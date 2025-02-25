@@ -10,7 +10,13 @@
 #import <MetalKit/MetalKit.h>
 #import "Renderer.h"
 
+@protocol NotificationDelegate<NSObject>
+- (void) notify: (NSDictionary *) data;
+- (void) onDisconnected;
+@end
+
+
 // Our macOS view controller.
-@interface ViewController : NSViewController
+@interface ViewController : NSViewController<NotificationDelegate>
 
 @end

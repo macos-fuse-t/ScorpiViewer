@@ -6,16 +6,16 @@
     id<MTLCommandQueue> _commandQueue;
     id<MTLRenderPipelineState> _pipelineState;
     id<MTLTexture> _texture;
+    id<MTLTexture> _nextTexture;  // Double buffer texture for safer updates
     MTKView *_view;
     
     id<MTLBuffer> _vertexBuffer;
     NSUInteger _numVertices;
     
-    // Framebuffer tracking
-    void *_framebufferPtr;
-    NSUInteger _framebufferWidth;
-    NSUInteger _framebufferHeight;
-    NSUInteger _bytesPerRow;
+    struct Scanout _scanout;
+    BOOL _shouldRender;
+    
+    dispatch_semaphore_t _renderSemaphore;  // Semaphore for synchronization
 }
 
 - (instancetype)initWithMetalKitView:(MTKView *)view {
@@ -25,10 +25,12 @@
         _commandQueue = [_device newCommandQueue];
         _view = view;
         
-        // Configure view for optimal updating
-        view.preferredFramesPerSecond = 30;
-        view.enableSetNeedsDisplay = NO;  // Use continuous updates
+        view.preferredFramesPerSecond = 60;
+        view.enableSetNeedsDisplay = NO;
         view.delegate = self;
+        
+        _shouldRender = NO;
+        _renderSemaphore = dispatch_semaphore_create(1); // Allow 1 thread at a time
         
         [self setupPipeline];
         [self setupVertices];
@@ -56,61 +58,94 @@
 - (void)setupVertices {
     static const float quadVertices[] = {
         -1.0, -1.0, 0.0, 1.0,
-         1.0, -1.0, 1.0, 1.0,
+        1.0, -1.0, 1.0, 1.0,
         -1.0,  1.0, 0.0, 0.0,
-         1.0,  1.0, 1.0, 0.0
+        1.0,  1.0, 1.0, 0.0
     };
     
     _vertexBuffer = [_device newBufferWithBytes:quadVertices
-                                        length:sizeof(quadVertices)
-                                       options:MTLResourceStorageModeShared];
+                                         length:sizeof(quadVertices)
+                                        options:MTLResourceStorageModeShared];
     _numVertices = 4;
 }
 
-- (void)updateWithFramebuffer:(void *)framebuffer width:(int)width height:(int)height {
-    if (!framebuffer) {
-        return;
-    }
-    
-    _framebufferPtr = framebuffer;
-    _framebufferWidth = width;
-    _framebufferHeight = height;
-    _bytesPerRow = width * 4; // Assuming RGBA8 format
-    
-    // Create the texture once
-    MTLTextureDescriptor *descriptor = [[MTLTextureDescriptor alloc] init];
-    descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
-    descriptor.width = width;
-    descriptor.height = height;
-    descriptor.usage = MTLTextureUsageShaderRead;
-    
-    _texture = [_device newTextureWithDescriptor:descriptor];
+- (void)stop {
+    dispatch_semaphore_wait(_renderSemaphore, DISPATCH_TIME_FOREVER);
+    _shouldRender = NO;
+    bzero(&_scanout, sizeof(_scanout));
+    dispatch_semaphore_signal(_renderSemaphore);
 }
 
-- (void)drawInMTKView:(MTKView *)view {
-    if (!_texture || !_framebufferPtr) {
+- (void)updateScanout:(struct Scanout)scanout {
+    dispatch_semaphore_wait(_renderSemaphore, DISPATCH_TIME_FOREVER);
+    
+    NSLog(@"updateScanout: %d", scanout.enabled);
+    
+    _scanout = scanout;
+    [self _updateTexture];
+    
+    _shouldRender = YES;
+    dispatch_semaphore_signal(_renderSemaphore);
+}
+
+- (void) _updateTexture {
+    
+    if (!_scanout.enabled)
         return;
-    }
+    
+    // Create a new texture in a background buffer
+    MTLTextureDescriptor *descriptor = [[MTLTextureDescriptor alloc] init];
+    descriptor.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    descriptor.width = _scanout.width;
+    descriptor.height = _scanout.height;
+    descriptor.usage = MTLTextureUsageShaderRead;
+    _nextTexture = [_device newTextureWithDescriptor:descriptor];
+    
+    // Swap textures after update
+    _texture = _nextTexture;
+    _nextTexture = nil;
+    
+    if (!_texture || !_scanout.base_ptr)
+        return;
     
     // Update texture from framebuffer
     MTLRegion region = {
         {0, 0, 0},
-        {_framebufferWidth, _framebufferHeight, 1}
+        {_scanout.width, _scanout.height, 1}
     };
     
     @try {
         [_texture replaceRegion:region
-                   mipmapLevel:0
-                     withBytes:_framebufferPtr
-                   bytesPerRow:_bytesPerRow];
+                    mipmapLevel:0
+                      withBytes:_scanout.base_ptr
+                    bytesPerRow:_scanout.width * 4];
     } @catch (NSException *exception) {
         NSLog(@"Texture update failed: %@", exception);
+    }
+}
+
+- (void) updateTexture {
+    NSLog(@"updateTexture");
+    dispatch_semaphore_wait(_renderSemaphore, DISPATCH_TIME_FOREVER);
+    [self _updateTexture];
+    dispatch_semaphore_signal(_renderSemaphore);
+}
+
+- (void)drawInMTKView:(MTKView *)view {
+    dispatch_semaphore_wait(_renderSemaphore, DISPATCH_TIME_FOREVER);
+    
+    if (!_shouldRender || !_texture || !_scanout.base_ptr) {
+        dispatch_semaphore_signal(_renderSemaphore);
         return;
     }
+    
+    if (_scanout.redrawOnTimer)
+        [self _updateTexture];
     
     // Render
     MTLRenderPassDescriptor *passDescriptor = view.currentRenderPassDescriptor;
     if (!passDescriptor) {
+        dispatch_semaphore_signal(_renderSemaphore);
         return;
     }
     
@@ -125,6 +160,8 @@
     [encoder endEncoding];
     [commandBuffer presentDrawable:view.currentDrawable];
     [commandBuffer commit];
+    
+    dispatch_semaphore_signal(_renderSemaphore);
 }
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
