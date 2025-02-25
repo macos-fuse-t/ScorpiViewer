@@ -125,7 +125,7 @@
 }
 
 - (void) updateTexture {
-    NSLog(@"updateTexture");
+    //NSLog(@"updateTexture");
     dispatch_semaphore_wait(_renderSemaphore, DISPATCH_TIME_FOREVER);
     [self _updateTexture];
     dispatch_semaphore_signal(_renderSemaphore);

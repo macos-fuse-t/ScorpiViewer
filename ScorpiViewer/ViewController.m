@@ -22,11 +22,12 @@
     int _buttonPressed;
     SocketClient *_sock;
     struct Scanout _scanout;
-    struct CursorScanout _cursor;
+    bool _cursorEnabled;
     NSCursor *_currentCursor;
     bool _cursorHidden;
     bool _hardwareCursor;
     NSTrackingArea *_trackingArea;
+    float _scaling;
 }
 
 - (void) notify: (NSDictionary *) data {
@@ -56,15 +57,21 @@
 - (void)resizeWindowToWidth:(int)width height:(int)height {
     NSWindow *window = self.view.window;
     if (window) {
-        NSLog(@"window size: %f %f", window.frame.size.width, window.frame.size.height);
-        NSSize newSize = NSMakeSize(width, height);
-        [window setContentSize:newSize];
+        CGFloat widthInPoints = width / _scaling;
+        CGFloat heightInPoints = height / _scaling;
 
-        // make non-resizable
+        NSRect contentRect = NSMakeRect(0, 0, widthInPoints, heightInPoints);
+
+        NSRect frameRect = [window frameRectForContentRect:contentRect];
+        frameRect.origin = window.frame.origin;
+
+        [window setFrame:frameRect display:YES animate:NO];
         [window setStyleMask:window.styleMask & ~NSWindowStyleMaskResizable];
 
-        if (_currentCursor)
-            [_currentCursor set];
+        NSLog(@"New window frame: %@", NSStringFromRect(window.frame));
+
+        //if (_currentCursor)
+         //   [_currentCursor set];
     } else {
         NSLog(@"Window not found. Cannot resize.");
     }
@@ -99,7 +106,8 @@
         return nil;
     }
 
-    NSImage *image = [[NSImage alloc] initWithCGImage:imageRef size:NSMakeSize(width, height)];
+    NSImage *image = [[NSImage alloc] initWithCGImage:imageRef
+                            size:NSMakeSize(width / _scaling, height / _scaling)];
     CGImageRelease(imageRef);
 
     if (!image) {
@@ -107,23 +115,14 @@
         return nil;
     }
 
-    NSCursor *customCursor = [[NSCursor alloc] initWithImage:image hotSpot:NSMakePoint(hotspotX, hotspotY)];
+    NSCursor *customCursor = [[NSCursor alloc] initWithImage:image
+                            hotSpot:NSMakePoint(hotspotX, hotspotY)];
     return customCursor;
-}
-
-- (void) releaseCursorScanout
-{
-    if (_cursor.enabled && _cursor.base_ptr) {
-        _currentCursor = nil;
-        //[_renderer hideCursor];
-        munmap(_cursor.base_ptr, _cursor.size);
-        bzero(&_cursor, sizeof(_cursor));
-    }
 }
 
 - (void) hideCursor
 {
-    [self releaseCursorScanout];
+    NSLog(@"hideCursor");
     if (!_hardwareCursor && !_cursorHidden) {
         [NSCursor hide];
         _cursorHidden = TRUE;
@@ -132,13 +131,15 @@
 
 - (void) setCursor: (NSDictionary *)data
 {
-    [self releaseCursorScanout];
+    struct CursorScanout cursor;
     
     NSString *shmName = data[@"shm_name"];
-    _cursor.width = [data[@"width"] intValue];
-    _cursor.height = [data[@"height"] intValue];
-    _cursor.hot_x = [data[@"hot_x"] intValue];
-    _cursor.hot_y = [data[@"hot_y"] intValue];
+    NSLog(@"setCursor %@", shmName);
+
+    cursor.width = [data[@"width"] intValue];
+    cursor.height = [data[@"height"] intValue];
+    cursor.hot_x = [data[@"hot_x"] intValue];
+    cursor.hot_y = [data[@"hot_y"] intValue];
     
     if (!shmName) {
         NSLog(@"Failed to retrieve shared memory name");
@@ -152,31 +153,34 @@
         return;
     }
 
-    _cursor.size = _cursor.width * _cursor.height * 4;
-    _cursor.base_ptr =  mmap(NULL, _cursor.size, PROT_READ, MAP_SHARED, shmFd, 0);
+    cursor.size = cursor.width * cursor.height * 4;
+    cursor.base_ptr = mmap(NULL, cursor.size, PROT_READ, MAP_SHARED, shmFd, 0);
     
     close(shmFd);
 
-    if (_cursor.base_ptr == MAP_FAILED) {
+    if (cursor.base_ptr == MAP_FAILED) {
         NSLog(@"mmap failed");
-        bzero(&_cursor, sizeof(_cursor));
         return;
     }
-    
+
     _hardwareCursor = TRUE;
-    _cursor.enabled = true;
-    _currentCursor = [self createCursorFromBuffer:_cursor.base_ptr width: _cursor.width
-                                        height:_cursor.height
-                                         hotspotX:_cursor.hot_x hotspotY:_cursor.hot_y];
+    _cursorEnabled = true;
+    NSCursor *nextCursor = [self createCursorFromBuffer:cursor.base_ptr
+                            width: cursor.width
+                            height:cursor.height
+                            hotspotX:cursor.hot_x
+                            hotspotY:cursor.hot_y];
+    munmap(cursor.base_ptr, cursor.size);
+    
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self->_currentCursor)
-            [self->_currentCursor set];
+        [nextCursor set];
+        self->_currentCursor = nextCursor;
     });
 }
 
 - (void) moveCursor: (NSDictionary *)data
 {
-    NSLog(@"move: %d %d", [data[@"x"] intValue], [data[@"y"] intValue]);
+    //NSLog(@"move: %d %d", [data[@"x"] intValue], [data[@"y"] intValue]);
 }
 
 - (void) releaseScanout
@@ -270,17 +274,32 @@
         return;
     }
 
-    // Enable High DPI by setting the drawable size
+    // Get the screen's backing scale factor (e.g., 2.0 for Retina displays)
     NSScreen *screen = self.view.window.screen ?: [NSScreen mainScreen];
-    CGFloat scaleFactor = screen.backingScaleFactor;
-    //_view.layer.contentsScale = scaleFactor;
-    scaleFactor = 1;
+    _scaling = screen.backingScaleFactor;
+    _scaling = 1;
+    NSLog(@"Backing scale factor: %f", _scaling);
 
-    // Adjust drawable size
-    _view.drawableSize = CGSizeMake(_view.bounds.size.width * scaleFactor,
-                                    _view.bounds.size.height * scaleFactor);
+    // Get the current window and its frame
+    NSWindow *window = self.view.window;
+    if (!window) {
+        NSLog(@"Window is nil. Ensure the view is attached to a window.");
+        return;
+    }
 
-    
+    NSRect frame = window.frame;
+
+    // Adjust the window size to real pixels
+    frame.size.width /= _scaling;
+    frame.size.height /= _scaling;
+
+    // Apply the new frame to the window
+    [window setFrame:frame display:YES animate:NO];
+
+    // Set the drawable size to match the view's bounds in real pixels
+    _view.drawableSize = CGSizeMake(_view.bounds.size.width * _scaling,
+                                    _view.bounds.size.height * _scaling);
+
     _renderer = [[Renderer alloc] initWithMetalKitView:_view];
     
     NSDictionary *data = [_sock requestScanout];
@@ -365,16 +384,16 @@
     _cursorHidden = FALSE;
 }
 
-- (NSPoint) locationFromEvent: (NSEvent *)event
-{
+- (NSPoint)locationFromEvent:(NSEvent *)event {
     NSPoint locationInWindow = [event locationInWindow];
     NSPoint locationInView = [self.view convertPoint:locationInWindow fromView:nil];
+
+    locationInView.x *= _scaling;
+    locationInView.y *= _scaling;
+
     NSRect contentFrame = self.view.bounds;
-    if (_currentCursor) {
-        locationInView.x -= _currentCursor.hotSpot.x;
-        locationInView.y -= _currentCursor.hotSpot.y;
-    }
-    locationInView.y = contentFrame.size.height - locationInView.y;
+    locationInView.y = (contentFrame.size.height * _scaling) - locationInView.y;
+
     return locationInView;
 }
 
