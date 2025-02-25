@@ -25,6 +25,7 @@
     struct CursorScanout _cursor;
     NSCursor *_currentCursor;
     bool _cursorHidden;
+    bool _hardwareCursor;
     NSTrackingArea *_trackingArea;
 }
 
@@ -58,8 +59,12 @@
         NSLog(@"window size: %f %f", window.frame.size.width, window.frame.size.height);
         NSSize newSize = NSMakeSize(width, height);
         [window setContentSize:newSize];
-        window.acceptsMouseMovedEvents = YES;
-        [_view.window makeFirstResponder:_view];
+
+        // make non-resizable
+        [window setStyleMask:window.styleMask & ~NSWindowStyleMaskResizable];
+
+        if (_currentCursor)
+            [_currentCursor set];
     } else {
         NSLog(@"Window not found. Cannot resize.");
     }
@@ -118,10 +123,11 @@
 
 - (void) hideCursor
 {
-    memset(&_cursor, 0, sizeof(_cursor));
-    _currentCursor = nil;
-    _cursorHidden = TRUE;
-    //[NSCursor hide];
+    [self releaseCursorScanout];
+    if (!_hardwareCursor && !_cursorHidden) {
+        [NSCursor hide];
+        _cursorHidden = TRUE;
+    }
 }
 
 - (void) setCursor: (NSDictionary *)data
@@ -131,6 +137,8 @@
     NSString *shmName = data[@"shm_name"];
     _cursor.width = [data[@"width"] intValue];
     _cursor.height = [data[@"height"] intValue];
+    _cursor.hot_x = [data[@"hot_x"] intValue];
+    _cursor.hot_y = [data[@"hot_y"] intValue];
     
     if (!shmName) {
         NSLog(@"Failed to retrieve shared memory name");
@@ -155,10 +163,11 @@
         return;
     }
     
+    _hardwareCursor = TRUE;
     _cursor.enabled = true;
     _currentCursor = [self createCursorFromBuffer:_cursor.base_ptr width: _cursor.width
                                         height:_cursor.height
-                                        hotspotX:_cursor.hot_x hotspotY:_cursor.hot_y];
+                                         hotspotX:_cursor.hot_x hotspotY:_cursor.hot_y];
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self->_currentCursor)
             [self->_currentCursor set];
@@ -167,8 +176,7 @@
 
 - (void) moveCursor: (NSDictionary *)data
 {
-    int x = [data[@"x"] intValue];
-    int y = [data[@"y"] intValue];
+    NSLog(@"move: %d %d", [data[@"x"] intValue], [data[@"y"] intValue]);
 }
 
 - (void) releaseScanout
@@ -180,6 +188,26 @@
     }
 }
 
+- (void) initDisplay: (NSDictionary *)data
+{
+    _hardwareCursor = data[@"hardware_mouse"] ? [ data[@"hardware_mouse"] boolValue] : false;
+    if (!_hardwareCursor)
+        [self hideCursor];
+    NSDictionary *scanout = data[@"scanout"];
+    if (scanout) {
+        if (scanout[@"shm_name"] && ![scanout[@"shm_name"] isEqual: @""])
+            [self setScanout: scanout];
+    }
+
+    NSDictionary *mouse_scanout = data[@"mouse_scanout"];
+    if (mouse_scanout) {
+        if (mouse_scanout[@"shm_name"] && ![mouse_scanout[@"shm_name"]  isEqual: @""])
+            [self setCursor: mouse_scanout];
+        else
+            [self hideCursor];
+    }
+}
+
 - (void) setScanout: (NSDictionary *)data
 {
     [self releaseScanout];
@@ -187,11 +215,7 @@
     NSString *shmName = data[@"shm_name"];
     _scanout.width = [data[@"width"] intValue];
     _scanout.height = [data[@"height"] intValue];
-    if (data[@"redrawOnTimer"]) {
-        _scanout.redrawOnTimer = [data[@"redrawOnTimer"] boolValue];
-        if (_scanout.redrawOnTimer)
-            [self hideCursor];
-    }
+    _scanout.redrawOnTimer = data[@"redrawOnTimer"] ?[data[@"redrawOnTimer"] boolValue] : false;
 
     if (!shmName) {
         NSLog(@"Failed to retrieve shared memory name");
@@ -249,17 +273,28 @@
     // Enable High DPI by setting the drawable size
     NSScreen *screen = self.view.window.screen ?: [NSScreen mainScreen];
     CGFloat scaleFactor = screen.backingScaleFactor;
+    //_view.layer.contentsScale = scaleFactor;
+    scaleFactor = 1;
+
+    // Adjust drawable size
+    _view.drawableSize = CGSizeMake(_view.bounds.size.width * scaleFactor,
+                                    _view.bounds.size.height * scaleFactor);
+
     
     _renderer = [[Renderer alloc] initWithMetalKitView:_view];
     
     NSDictionary *data = [_sock requestScanout];
     if (data) {
-        [self setScanout: data];
+        [self initDisplay: data];
     }
 
     [_renderer mtkView:_view drawableSizeWillChange:_view.drawableSize];
     _view.delegate = _renderer;
-    
+
+    _view.window.acceptsMouseMovedEvents = YES;
+    [_view.window makeFirstResponder:_view];
+
+    // fake mouse event to wake up screen
     //[_sock sendMouseEventWithButton:0 x:0 y:0];
 }
 
@@ -271,7 +306,7 @@
     }
 
     _trackingArea = [[NSTrackingArea alloc] initWithRect:self.view.bounds
-        options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways /*| NSTrackingInVisibleRect*/)
         owner:self
         userInfo:nil];
 
@@ -316,61 +351,79 @@
 }
 
 - (void)mouseEntered:(NSEvent *)event {
-   // if (_cursorHidden)
-     //   [NSCursor hide];
+    if (!_hardwareCursor && !_cursorHidden && _scanout.enabled) {
+        _cursorHidden = TRUE;
+        [NSCursor hide];
+    }
     if (_currentCursor)
         [_currentCursor set];
 }
 
 - (void)mouseExited:(NSEvent *)event {
-    [NSCursor unhide];
+    if (_cursorHidden)
+        [NSCursor unhide];
+    _cursorHidden = FALSE;
+}
+
+- (NSPoint) locationFromEvent: (NSEvent *)event
+{
+    NSPoint locationInWindow = [event locationInWindow];
+    NSPoint locationInView = [self.view convertPoint:locationInWindow fromView:nil];
+    NSRect contentFrame = self.view.bounds;
+    if (_currentCursor) {
+        locationInView.x -= _currentCursor.hotSpot.x;
+        locationInView.y -= _currentCursor.hotSpot.y;
+    }
+    locationInView.y = contentFrame.size.height - locationInView.y;
+    return locationInView;
 }
 
 - (void)mouseMoved:(NSEvent *)event {
-    NSPoint location = [event locationInWindow];
-    NSRect windowFrame = self.view.bounds;
-    if (NSPointInRect(location, windowFrame)) {
-        NSLog(@"mouse location %.0f, %.0f", location.x, location.y);
-        [_sock sendMouseEventWithButton:_buttonPressed x:(int)location.x y:(int)(_view.frame.size.height - location.y)];
-    }
+   
+    NSPoint locationInView = [self locationFromEvent: event];
+    [_sock sendMouseEventWithButton:_buttonPressed
+                                      x:(int)locationInView.x
+                                      y:(int)locationInView.y];
 }
 
 - (void)mouseDragged:(NSEvent *)event {
-    NSPoint location = [event locationInWindow];
-    [_sock sendMouseEventWithButton:1 x:(int)location.x y:(int)(_view.frame.size.height - location.y)];
+    NSPoint locationInView = [self locationFromEvent: event];
+    [_sock sendMouseEventWithButton:1
+                                x:(int)locationInView.x
+                                y:(int)locationInView.y];
 }
 
 - (void)mouseDown:(NSEvent *)event {
-    NSPoint location = [event locationInWindow];
+    NSPoint location = [self locationFromEvent: event];
     _buttonPressed |= 1;
-    [_sock sendMouseEventWithButton:_buttonPressed x:(int)location.x y:(int)(_view.frame.size.height - location.y)];
+    [_sock sendMouseEventWithButton:_buttonPressed x:(int)location.x y:(int)location.y];
 }
 
 - (void)mouseUp:(NSEvent *)event {
-    NSPoint location = [event locationInWindow];
+    NSPoint location = [self locationFromEvent: event];
     _buttonPressed &= ~1;
-    [_sock sendMouseEventWithButton:0 x:(int)location.x y:(int)(_view.frame.size.height - location.y)];
+    [_sock sendMouseEventWithButton:0 x:(int)location.x y:(int)location.y];
 }
 
 - (void)rightMouseDown:(NSEvent *)event {
-    NSPoint location = [event locationInWindow];
+    NSPoint location = [self locationFromEvent: event];
     _buttonPressed |= 2;
-    [_sock sendMouseEventWithButton:_buttonPressed x:(int)location.x y:(int)(_view.frame.size.height - location.y)];
+    [_sock sendMouseEventWithButton:_buttonPressed x:(int)location.x y:(int)location.y];
 }
 
 - (void)rightMouseUp:(NSEvent *)event {
-    NSPoint location = [event locationInWindow];
+    NSPoint location = [self locationFromEvent: event];
     _buttonPressed &= ~2;
-    [_sock sendMouseEventWithButton: 0 x:(int)location.x y:(int)(_view.frame.size.height - location.y)];
+    [_sock sendMouseEventWithButton: 0 x:(int)location.x y:(int)location.y];
 }
 
 - (void)scrollWheel:(NSEvent *)event {
     //NSLog(@"Scrolled: deltaX = %f, deltaY = %f", event.scrollingDeltaX, event.scrollingDeltaY);
-    NSPoint location = [event locationInWindow];
+    NSPoint location = [self locationFromEvent: event];
     if (event.scrollingDeltaY > 5)
-        [_sock sendMouseEventWithButton:_buttonPressed | 8 x:(int)location.x y:(int)(_view.frame.size.height - location.y)];
+        [_sock sendMouseEventWithButton:_buttonPressed | 8 x:(int)location.x y:(int)location.y];
     else if (event.scrollingDeltaY < -5)
-        [_sock sendMouseEventWithButton: _buttonPressed | 16 x:(int)location.x y:(int)(_view.frame.size.height - location.y)];
+        [_sock sendMouseEventWithButton: _buttonPressed | 16 x:(int)location.x y:(int)location.y];
 }
 
 
