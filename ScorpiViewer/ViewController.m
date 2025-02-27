@@ -28,6 +28,7 @@
     bool _hardwareCursor;
     NSTrackingArea *_trackingArea;
     float _scaling;
+    bool _hdpi;
 }
 
 - (void) notify: (NSDictionary *) data {
@@ -194,6 +195,8 @@
 
 - (void) initDisplay: (NSDictionary *)data
 {
+    _hdpi = data[@"hdpi"] ? [ data[@"hdpi"] boolValue] : false;
+
     _hardwareCursor = data[@"hardware_mouse"] ? [ data[@"hardware_mouse"] boolValue] : false;
     if (!_hardwareCursor)
         [self hideCursor];
@@ -274,10 +277,16 @@
         return;
     }
 
+    NSDictionary *data = [_sock requestScanout];
+    if (data) {
+        [self initDisplay: data];
+    }
+
     // Get the screen's backing scale factor (e.g., 2.0 for Retina displays)
     NSScreen *screen = self.view.window.screen ?: [NSScreen mainScreen];
     _scaling = screen.backingScaleFactor;
-    _scaling = 1;
+    if (!_hdpi)
+        _scaling = 1;
     NSLog(@"Backing scale factor: %f", _scaling);
 
     // Get the current window and its frame
@@ -302,11 +311,6 @@
 
     _renderer = [[Renderer alloc] initWithMetalKitView:_view];
     
-    NSDictionary *data = [_sock requestScanout];
-    if (data) {
-        [self initDisplay: data];
-    }
-
     [_renderer mtkView:_view drawableSizeWillChange:_view.drawableSize];
     _view.delegate = _renderer;
 
@@ -400,6 +404,8 @@
 - (void)mouseMoved:(NSEvent *)event {
    
     NSPoint locationInView = [self locationFromEvent: event];
+    if (locationInView.x < 0 || locationInView.y < 0)
+        return;
     [_sock sendMouseEventWithButton:_buttonPressed
                                       x:(int)locationInView.x
                                       y:(int)locationInView.y];
