@@ -7,6 +7,8 @@
 
 #import <MetalKit/MetalKit.h>
 
+#define roundup2(x, y)         (((x)+((y)-1))&(~((y)-1)))
+
 struct Scanout
 {
     int width;

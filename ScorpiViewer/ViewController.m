@@ -34,7 +34,6 @@
 - (void) notify: (NSDictionary *) data {
     NSString *event = data[@"event"];
     if ([event  isEqual: @"set_scanout"]) {
-        NSLog(@"set_scanout");
         [self setScanout: data[@"data"]];
     } else if ([event  isEqual: @"unset_scanout"]) {
         [self releaseScanout];
@@ -67,7 +66,7 @@
         frameRect.origin = window.frame.origin;
 
         [window setFrame:frameRect display:YES animate:NO];
-        [window setStyleMask:window.styleMask & ~NSWindowStyleMaskResizable];
+        //[window setStyleMask:window.styleMask & ~NSWindowStyleMaskResizable];
 
         NSLog(@"New window frame: %@", NSStringFromRect(window.frame));
 
@@ -223,6 +222,7 @@
     _scanout.width = [data[@"width"] intValue];
     _scanout.height = [data[@"height"] intValue];
     _scanout.redrawOnTimer = data[@"redrawOnTimer"] ?[data[@"redrawOnTimer"] boolValue] : false;
+    NSLog(@"setScanout: %d %d", _scanout.width, _scanout.height);
 
     if (!shmName) {
         NSLog(@"Failed to retrieve shared memory name");
@@ -236,7 +236,7 @@
         return;
     }
 
-    _scanout.size = _scanout.width * _scanout.height * 4;
+    _scanout.size = roundup2(_scanout.width, 64) * 4 * _scanout.height;
     _scanout.base_ptr =  mmap(NULL, _scanout.size, PROT_READ, MAP_SHARED, shmFd, 0);
     
     close(shmFd);
@@ -277,6 +277,8 @@
         return;
     }
 
+    _renderer = [[Renderer alloc] initWithMetalKitView:_view];
+
     NSDictionary *data = [_sock requestScanout];
     if (data) {
         [self initDisplay: data];
@@ -308,14 +310,12 @@
     // Set the drawable size to match the view's bounds in real pixels
     _view.drawableSize = CGSizeMake(_view.bounds.size.width * _scaling,
                                     _view.bounds.size.height * _scaling);
-
-    _renderer = [[Renderer alloc] initWithMetalKitView:_view];
     
     [_renderer mtkView:_view drawableSizeWillChange:_view.drawableSize];
     _view.delegate = _renderer;
 
     _view.window.acceptsMouseMovedEvents = YES;
-    [_view.window makeFirstResponder:_view];
+    [_view.window makeFirstResponder: self];
 
     // fake mouse event to wake up screen
     //[_sock sendMouseEventWithButton:0 x:0 y:0];
@@ -334,6 +334,12 @@
         userInfo:nil];
 
     [self.view addTrackingArea:_trackingArea];
+    
+    NSWindow *window = self.view.window;
+    NSSize s = window.contentView.frame.size;
+    if (_scanout.enabled && (_scanout.width != s.width * _scaling || _scanout.height != s.height * _scaling)) {
+        [_sock requestResize:(int)(s.width * _scaling) y:(int)(s.height * _scaling)];
+    }
 }
 
 

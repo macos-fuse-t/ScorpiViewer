@@ -7,6 +7,16 @@
 	objects = {
 
 /* Begin PBXFileReference section */
+		AA2487FB2D7216B000466800 /* barrier.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = barrier.h; sourceTree = "<group>"; };
+		AA2487FC2D7216B000466800 /* end-packed.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "end-packed.h"; sourceTree = "<group>"; };
+		AA2487FD2D7216B000466800 /* enums.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = enums.h; sourceTree = "<group>"; };
+		AA2487FE2D7216B000466800 /* ipc_ring.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ipc_ring.h; sourceTree = "<group>"; };
+		AA2487FF2D7216B000466800 /* protocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = protocol.h; sourceTree = "<group>"; };
+		AA2488002D7216B000466800 /* start-packed.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "start-packed.h"; sourceTree = "<group>"; };
+		AA2488012D7216B000466800 /* stats.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = stats.h; sourceTree = "<group>"; };
+		AA2488022D7216B000466800 /* stream_device.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = stream_device.h; sourceTree = "<group>"; };
+		AA2488032D7216B000466800 /* types.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = types.h; sourceTree = "<group>"; };
+		AA2488042D7216B000466800 /* vd_agent.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = vd_agent.h; sourceTree = "<group>"; };
 		AAA21D992D39A0F700CEE3AC /* ScorpiViewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScorpiViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -42,9 +52,35 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		AA2488052D7216B000466800 /* protocol */ = {
+			isa = PBXGroup;
+			children = (
+				AA2487FB2D7216B000466800 /* barrier.h */,
+				AA2487FC2D7216B000466800 /* end-packed.h */,
+				AA2487FD2D7216B000466800 /* enums.h */,
+				AA2487FE2D7216B000466800 /* ipc_ring.h */,
+				AA2487FF2D7216B000466800 /* protocol.h */,
+				AA2488002D7216B000466800 /* start-packed.h */,
+				AA2488012D7216B000466800 /* stats.h */,
+				AA2488022D7216B000466800 /* stream_device.h */,
+				AA2488032D7216B000466800 /* types.h */,
+				AA2488042D7216B000466800 /* vd_agent.h */,
+			);
+			path = protocol;
+			sourceTree = "<group>";
+		};
+		AA2488062D7216B000466800 /* spice */ = {
+			isa = PBXGroup;
+			children = (
+				AA2488052D7216B000466800 /* protocol */,
+			);
+			path = spice;
+			sourceTree = "<group>";
+		};
 		AAA21D902D39A0F700CEE3AC = {
 			isa = PBXGroup;
 			children = (
+				AA2488062D7216B000466800 /* spice */,
 				AAA21D9B2D39A0F700CEE3AC /* ScorpiViewer */,
 				AAA21D9A2D39A0F700CEE3AC /* Products */,
 			);

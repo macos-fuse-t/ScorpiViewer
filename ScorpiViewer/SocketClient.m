@@ -53,6 +53,9 @@
         perror("socket");
         return NO;
     }
+    int size = 1048576;
+    setsockopt(self.sock, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+    setsockopt(self.sock, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
 
     self.clientSocketPath = [self generateTemporaryFileName];
 
@@ -230,6 +233,21 @@
         close(self.sock);
         self.sock = -1;
     }
+}
+
+- (void)requestResize: (int)x y: (int)y
+{
+    long requestId = [self generateRequestId];
+    NSDictionary *request = @{
+        @"type": @"request",
+        @"id": @(requestId),
+        @"action": @"resize_framebuffer",
+        @"args":@[
+            [NSString stringWithFormat:@"%d", x],
+            [NSString stringWithFormat:@"%d", y],
+        ],
+    };
+    [self sendSyncRequest:request expectResponse: FALSE];
 }
 
 @end

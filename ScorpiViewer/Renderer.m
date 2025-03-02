@@ -89,10 +89,9 @@
 }
 
 - (void) _updateTexture {
-    
     if (!_scanout.enabled)
         return;
-    
+
     // Create a new texture in a background buffer
     MTLTextureDescriptor *descriptor = [[MTLTextureDescriptor alloc] init];
     descriptor.pixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -113,15 +112,19 @@
         {0, 0, 0},
         {_scanout.width, _scanout.height, 1}
     };
-    
+
+    NSUInteger bytesPerRow = roundup2(_scanout.width,  64) * 4;
     @try {
         [_texture replaceRegion:region
                     mipmapLevel:0
                       withBytes:_scanout.base_ptr
-                    bytesPerRow:_scanout.width * 4];
+                    bytesPerRow: bytesPerRow];
     } @catch (NSException *exception) {
         NSLog(@"Texture update failed: %@", exception);
     }
+    
+    static int id1 = 0;
+    NSLog(@"_updateTexture %d", id1++);
 }
 
 - (void) updateTexture {

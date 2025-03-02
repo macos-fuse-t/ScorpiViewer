@@ -12,6 +12,7 @@
 
 - (BOOL)connectToSocket:(NSString *)socketPath;
 - (NSDictionary *)requestScanout;
+- (void)requestResize: (int)x y: (int)y;
 - (void)sendMouseEventWithButton:(int)button x:(int)x y:(int)y;
 - (void)sendKeyEventWithDown:(int)down hidcode:(uint8_t)hidcode mods:(uint8_t)mods;
 - (void)disconnect;
