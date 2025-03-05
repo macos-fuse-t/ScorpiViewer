@@ -149,7 +149,6 @@
     int shmFd = shm_open([shmName UTF8String], O_RDONLY, 0);
     if (shmFd < 0) {
         NSLog(@"shm_open failed");
-        bzero(&_scanout, sizeof(_scanout));
         return;
     }
 
@@ -235,7 +234,6 @@
     int shmFd = shm_open([shmName UTF8String], O_RDONLY, 0);
     if (shmFd < 0) {
         NSLog(@"shm_open failed");
-        bzero(&_scanout, sizeof(_scanout));
         return;
     }
 
