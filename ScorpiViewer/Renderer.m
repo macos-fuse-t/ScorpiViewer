@@ -79,7 +79,7 @@
 - (void)updateScanout:(struct Scanout)scanout {
     dispatch_semaphore_wait(_renderSemaphore, DISPATCH_TIME_FOREVER);
     
-    NSLog(@"updateScanout: %d", scanout.enabled);
+    NSLog(@"updateScanout: %d, %dx%d", scanout.enabled, scanout.width, scanout.height);
     
     _scanout = scanout;
     [self _updateTexture];
@@ -113,18 +113,18 @@
         {_scanout.width, _scanout.height, 1}
     };
 
-    NSUInteger bytesPerRow = roundup2(_scanout.width,  64) * 4;
+    NSUInteger bytesPerRow = _scanout.stride;
     @try {
         [_texture replaceRegion:region
                     mipmapLevel:0
-                      withBytes:_scanout.base_ptr
+                    withBytes:_scanout.base_ptr
                     bytesPerRow: bytesPerRow];
     } @catch (NSException *exception) {
         NSLog(@"Texture update failed: %@", exception);
     }
     
-    static int id1 = 0;
-    NSLog(@"_updateTexture %d", id1++);
+    //static int id1 = 0;
+    //NSLog(@"_updateTexture %d", id1++);
 }
 
 - (void) updateTexture {

@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA2488142D76266900466800 /* libwebsockets.a in Frameworks */ = {isa = PBXBuildFile; fileRef = AA2488132D76266900466800 /* libwebsockets.a */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		AA2487FB2D7216B000466800 /* barrier.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = barrier.h; sourceTree = "<group>"; };
 		AA2487FC2D7216B000466800 /* end-packed.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "end-packed.h"; sourceTree = "<group>"; };
@@ -17,6 +21,7 @@
 		AA2488022D7216B000466800 /* stream_device.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = stream_device.h; sourceTree = "<group>"; };
 		AA2488032D7216B000466800 /* types.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = types.h; sourceTree = "<group>"; };
 		AA2488042D7216B000466800 /* vd_agent.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = vd_agent.h; sourceTree = "<group>"; };
+		AA2488132D76266900466800 /* libwebsockets.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libwebsockets.a; sourceTree = "<group>"; };
 		AAA21D992D39A0F700CEE3AC /* ScorpiViewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScorpiViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -46,6 +51,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA2488142D76266900466800 /* libwebsockets.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -77,11 +83,20 @@
 			path = spice;
 			sourceTree = "<group>";
 		};
+		AA2488072D7623DC00466800 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				AA2488132D76266900466800 /* libwebsockets.a */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		AAA21D902D39A0F700CEE3AC = {
 			isa = PBXGroup;
 			children = (
 				AA2488062D7216B000466800 /* spice */,
 				AAA21D9B2D39A0F700CEE3AC /* ScorpiViewer */,
+				AA2488072D7623DC00466800 /* Frameworks */,
 				AAA21D9A2D39A0F700CEE3AC /* Products */,
 			);
 			sourceTree = "<group>";
@@ -231,6 +246,7 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
+				USER_HEADER_SEARCH_PATHS = /usr/local/include/;
 			};
 			name = Debug;
 		};
@@ -285,12 +301,14 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
+				USER_HEADER_SEARCH_PATHS = /usr/local/include/;
 			};
 			name = Release;
 		};
 		AAA21DB32D39A0F800CEE3AC /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = ScorpiViewer/ScorpiViewer.entitlements;
@@ -309,16 +327,22 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)",
+				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "org.fuse-t.ScorpiViewer";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				USER_HEADER_SEARCH_PATHS = /usr/local/include/;
 			};
 			name = Debug;
 		};
 		AAA21DB42D39A0F800CEE3AC /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = ScorpiViewer/ScorpiViewer.entitlements;
@@ -337,10 +361,15 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)",
+				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "org.fuse-t.ScorpiViewer";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				USER_HEADER_SEARCH_PATHS = /usr/local/include/;
 			};
 			name = Release;
 		};

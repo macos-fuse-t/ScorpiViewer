@@ -13,6 +13,7 @@ struct Scanout
 {
     int width;
     int height;
+    int stride;
     int pixelFormat;
     void *base_ptr;
     size_t size;

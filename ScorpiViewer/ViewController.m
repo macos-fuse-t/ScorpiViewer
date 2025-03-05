@@ -221,8 +221,11 @@
     NSString *shmName = data[@"shm_name"];
     _scanout.width = [data[@"width"] intValue];
     _scanout.height = [data[@"height"] intValue];
+    _scanout.size = data[@"shm_size"] ? [data[@"shm_size"] longValue] : 0;
+    _scanout.stride = [data[@"stride"] intValue];
+    _scanout.pixelFormat = [data[@"format"] intValue];
     _scanout.redrawOnTimer = data[@"redrawOnTimer"] ?[data[@"redrawOnTimer"] boolValue] : false;
-    NSLog(@"setScanout: %d %d", _scanout.width, _scanout.height);
+    NSLog(@"setScanout: %d %d, format %d", _scanout.width, _scanout.height, _scanout.pixelFormat);
 
     if (!shmName) {
         NSLog(@"Failed to retrieve shared memory name");
@@ -236,7 +239,8 @@
         return;
     }
 
-    _scanout.size = roundup2(_scanout.width, 64) * 4 * _scanout.height;
+    if (!_scanout.size)
+        _scanout.size = roundup2(_scanout.width * 4, 32) * _scanout.height;
     _scanout.base_ptr =  mmap(NULL, _scanout.size, PROT_READ, MAP_SHARED, shmFd, 0);
     
     close(shmFd);

@@ -4,16 +4,22 @@
 //
 //  Created by alex fishman on 18/01/2025.
 //
-#import <sys/un.h>
+
+#import <libwebsockets.h>
 #import "SocketClient.h"
 #import <stdatomic.h>
 
+
 @interface SocketClient ()
-@property (nonatomic, assign) int sock;
-@property (nonatomic, strong) NSString *clientSocketPath;
-@property (nonatomic, strong) dispatch_queue_t responseQueue;
+@property (nonatomic, assign) struct lws_context *context;
+@property (nonatomic, assign) struct lws *wsi;
+@property (nonatomic, strong) NSLock *queueLock;
 @property (nonatomic, strong) NSMutableDictionary *responseStorage;
+@property (nonatomic, strong) NSMutableDictionary *semaphoreStorage;
 @property (nonatomic, assign) atomic_long atomic_request_id;
+@property (nonatomic, strong) NSString *serverSocketPath;
+@property (nonatomic, strong) NSMutableArray *messageQueue;
+@property (nonatomic, assign) bool connected;
 @end
 
 @implementation SocketClient
@@ -21,9 +27,12 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _responseQueue = dispatch_queue_create("SocketClientResponseQueue", DISPATCH_QUEUE_SERIAL);
         _responseStorage = [NSMutableDictionary dictionary];
+        _semaphoreStorage = [NSMutableDictionary dictionary];
+        _messageQueue = [[NSMutableArray alloc] init];
+        _queueLock = [[NSLock alloc] init];
         atomic_store(&_atomic_request_id, 1);
+        _connected = false;
     }
     return self;
 }
@@ -32,173 +41,184 @@
     return atomic_fetch_add(&_atomic_request_id, 1);
 }
 
-- (NSString *)generateTemporaryFileName {
-    NSString *tempDirectory = NSTemporaryDirectory();
-    
-    if (!tempDirectory) {
-        NSLog(@"Unable to locate temporary directory");
-        return nil;
+static int websocket_callback(struct lws *wsi, enum lws_callback_reasons reason,
+                              void *user, void *in, size_t len) {
+    SocketClient *client = (__bridge SocketClient *)lws_context_user(lws_get_context(wsi));
+
+    switch (reason) {
+        case LWS_CALLBACK_CLIENT_ESTABLISHED:
+            NSLog(@"Connected to server!");
+            client.connected = true;
+            break;
+
+        case LWS_CALLBACK_CLIENT_RECEIVE: {
+            NSData *receivedData = [NSData dataWithBytes:in length:len];
+            NSError *error;
+            NSDictionary *jsonDict = [NSJSONSerialization JSONObjectWithData:receivedData options:0 error:&error];
+            if (!jsonDict || error) {
+                NSLog(@"Failed to parse incoming JSON: %@", error.localizedDescription);
+                return 0;
+            }
+
+            NSString *type = jsonDict[@"type"];
+            NSNumber *msgId = jsonDict[@"id"];
+
+            if ([type isEqualToString:@"response"] && msgId) {
+                [client.queueLock lock];
+                dispatch_semaphore_t semaphore = [client.semaphoreStorage objectForKey:msgId];
+                if (semaphore) {
+                    [client.responseStorage setObject:jsonDict forKey:msgId];
+                    dispatch_semaphore_signal(semaphore);
+                }
+                [client.queueLock unlock];
+            } else if ([type isEqualToString:@"notification"] && client.delegate) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [client.delegate notify:jsonDict[@"data"]];
+                });
+            }
+            break;
+        }
+            
+        case LWS_CALLBACK_CLIENT_WRITEABLE: {
+            NSData *message = nil;
+            [client.queueLock lock];
+            if (client.messageQueue.count > 0) {
+                message = client.messageQueue[0];
+                [client.messageQueue removeObjectAtIndex:0];
+            }
+            [client.queueLock unlock];
+
+            if (message) {
+                unsigned char buf[LWS_PRE + message.length];
+                memcpy(&buf[LWS_PRE], message.bytes, message.length);
+
+                if (lws_write(wsi, &buf[LWS_PRE], message.length, LWS_WRITE_TEXT) < 0) {
+                    NSLog(@"Failed to send message");
+                    [client disconnect];
+                }
+                if (client.connected) {
+                    lws_callback_on_writable(wsi);
+                }
+            }
+            break;
+        }
+        case LWS_CALLBACK_CLIENT_CLOSED:
+            NSLog(@"Disconnected from server.");
+            [client disconnect];
+            break;
+
+        default:
+            break;
     }
-    
-    NSString *uniqueFileName = [[NSUUID UUID] UUIDString];
-    NSString *tempFilePath = [tempDirectory stringByAppendingPathComponent:uniqueFileName];
-    
-    return tempFilePath;
+
+    return 0;
 }
 
+static const struct lws_protocols protocols[] = {
+    { "scorpi-cnc", websocket_callback, 0, 1024 },
+    { NULL, NULL, 0, 0 }
+};
+
 - (BOOL)connectToSocket:(NSString *)socketPath {
-    const char *cSocketPath = [socketPath UTF8String];
-    self.sock = socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (self.sock < 0) {
-        perror("socket");
-        return NO;
-    }
-    int size = 1048576;
-    setsockopt(self.sock, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
-    setsockopt(self.sock, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+    struct lws_context_creation_info info;
+    memset(&info, 0, sizeof(info));
+    
+    lws_set_log_level(LLL_ERR, NULL);
+ 
+    info.port = CONTEXT_PORT_NO_LISTEN;
+    info.protocols = protocols;
+    info.options = LWS_SERVER_OPTION_UNIX_SOCK;
+    info.iface = [socketPath UTF8String];
+    info.gid = -1;
+    info.uid = -1;
+    info.user = (__bridge void *)self;
 
-    self.clientSocketPath = [self generateTemporaryFileName];
-
-    struct sockaddr_un client_addr;
-    memset(&client_addr, 0, sizeof(client_addr));
-    client_addr.sun_family = AF_UNIX;
-    strncpy(client_addr.sun_path, [self.clientSocketPath UTF8String], sizeof(client_addr.sun_path) - 1);
-    unlink(client_addr.sun_path);
-
-    if (bind(self.sock, (struct sockaddr *)&client_addr, sizeof(client_addr)) < 0) {
-        perror("bind");
-        close(self.sock);
+    self.context = lws_create_context(&info);
+    if (!self.context) {
+        NSLog(@"Failed to create LWS context");
         return NO;
     }
 
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, cSocketPath, sizeof(addr.sun_path) - 1);
+    self.serverSocketPath = socketPath;
 
-    if (connect(self.sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("connect");
-        close(self.sock);
+    struct lws_client_connect_info connect_info = { 0 };
+    connect_info.context = self.context;
+    connect_info.protocol = protocols[0].name;
+    connect_info.address = [[NSString stringWithFormat: @"+%@", socketPath] UTF8String];
+    connect_info.port = CONTEXT_PORT_NO_LISTEN;
+
+    self.wsi = lws_client_connect_via_info(&connect_info);
+    if (!self.wsi) {
+        NSLog(@"Failed to connect to server");
         return NO;
     }
 
-    // Start listening thread
-    [self startListeningThread];
-
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        while (1) {
+            lws_service(self.context, 100);
+        }
+    });
     return YES;
 }
 
-- (void)startListeningThread {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        while (self.sock >= 0) {
-            char buffer[1024] = {0};
-            ssize_t len = recv(self.sock, buffer, sizeof(buffer) - 1, 0);
-            if (len > 0) {
-                buffer[len] = '\0';
-                [self handleIncomingMessage:[NSString stringWithUTF8String:buffer]];
-            } else if (len == 0) {
-                break;
-            } else {
-                perror("recv");
-                break;
-            }
-        }
-    });
-}
-
-- (void)handleIncomingMessage:(NSString *)jsonString {
-    NSError *error = nil;
-    NSDictionary *jsonDict = [NSJSONSerialization JSONObjectWithData:[jsonString dataUsingEncoding:NSUTF8StringEncoding]
-                                        options:0
-                                        error:&error];
-
-    if (!jsonDict || error) {
-        NSLog(@"Failed to parse incoming JSON: %@", error.localizedDescription);
+- (void)queueMessage:(NSData *)message {
+    if (!self.connected)
         return;
-    }
 
-    NSString *type = jsonDict[@"type"];
-    long msgId = [jsonDict[@"id"] longValue];
-    NSString *msgIdStr = [NSString stringWithFormat:@"%ld", msgId];
-
-    if ([type isEqualToString:@"response"] && msgId) {
-        // Store response in a synchronized dictionary
-        dispatch_sync(self.responseQueue, ^{
-            self.responseStorage[msgIdStr] = jsonDict;
-        });
-    } else if ([type isEqualToString:@"notification"]) {
-        [self handleNotification:jsonDict];
-    }
+    [self.messageQueue addObject:message];
 }
 
-- (void)handleNotification:(NSDictionary *)notification {
-    //NSLog(@"Received notification: %@", notification);
-    if (self.delegate)
-        [self.delegate notify: notification[@"data"]];
-}
+- (NSDictionary *)sendSyncRequest:(NSDictionary *)request expectResponse:(BOOL)wait {
+    NSDictionary *rsp = nil;
+    dispatch_semaphore_t semaphore;
 
-- (NSDictionary *)sendSyncRequest:(NSDictionary *)request expectResponse: (BOOL) wait {
-    long msgId = [request[@"id"] longValue];
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
+    if (!self.connected)
+        return nil;
+
+    long msgId = [self generateRequestId];
+    NSMutableDictionary *wrappedRequest = [NSMutableDictionary dictionaryWithDictionary:request];
+    wrappedRequest[@"id"] = @(msgId);
+    
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:wrappedRequest options:0 error:nil];
     if (!jsonData) {
         NSLog(@"Failed to serialize request JSON");
         return nil;
     }
 
-    if (write(self.sock, jsonData.bytes, jsonData.length) < 0) {
-        perror("write");
-        [self disconnect];
-        if (self.delegate)
-            [self.delegate onDisconnected];
-        return nil;
+    [self.queueLock lock];
+    if (wait) {
+        semaphore = dispatch_semaphore_create(0);
+        [self.semaphoreStorage setObject:semaphore forKey:@(msgId)];
     }
-    
+    [self queueMessage:jsonData];
+    [self.queueLock unlock];
+
+    lws_callback_on_writable(self.wsi);
     if (!wait)
         return nil;
 
-    NSString *msgIdStr = [NSString stringWithFormat:@"%ld", msgId];
-    // Wait for a response (with a timeout)
-    NSDate *timeoutDate = [NSDate dateWithTimeIntervalSinceNow:5.0];
-    while ([[NSDate date] compare:timeoutDate] == NSOrderedAscending) {
-        __block NSDictionary *response = nil;
-        dispatch_sync(self.responseQueue, ^{
-            response = self.responseStorage[msgIdStr];
-        });
-
-        if (response) {
-            dispatch_sync(self.responseQueue, ^{
-                [self.responseStorage removeObjectForKey:msgIdStr];
-            });
-            return response;
-        }
-
-        [NSThread sleepForTimeInterval:0.1]; // Small delay before checking again
+    dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(semaphore, timeout) != 0) {
+        NSLog(@"Request timed out for id: %ld", msgId);
+        [self.queueLock lock];
+        [self.semaphoreStorage removeObjectForKey:@(msgId)];
+        [self.responseStorage removeObjectForKey: @(msgId)];
+        [self.queueLock unlock];
+        return nil;
     }
 
-    NSLog(@"Request timed out for id: %@", msgIdStr);
-    return nil;
-}
-
-- (NSDictionary*) requestScanout {
-    long requestId = [self generateRequestId];
-    NSDictionary *request = @{
-        @"type": @"request",
-        @"id": @(requestId),
-        @"action": @"get_framebuffer"
-    };
-
-    NSDictionary *response = [self sendSyncRequest:request expectResponse: TRUE];
-    if (!response) return NULL;
-
-    if (![response[@"status"] isEqualToString:@"success"]) {
-        NSLog(@"Server responded with error");
-        return NULL;
-    }
-
-    return response[@"data"];
+    [self.queueLock lock];
+    [self.semaphoreStorage removeObjectForKey:@(msgId)];
+    rsp = [self.responseStorage objectForKey: @(msgId)];
+    [self.responseStorage removeObjectForKey: @(msgId)];
+    [self.queueLock unlock];
+    return rsp;
 }
 
 - (void)sendMouseEventWithButton:(int)button x:(int)x y:(int)y {
+    if (!_connected)
+        return;
+
     long requestId = [self generateRequestId];
     NSDictionary *request = @{
         @"type": @"request",
@@ -214,6 +234,9 @@
 }
 
 - (void)sendKeyEventWithDown:(int)down hidcode:(uint8_t)hidcode mods:(uint8_t)mods {
+    if (!_connected)
+        return;
+
     long requestId = [self generateRequestId];
     NSDictionary *request = @{
         @"type": @"request",
@@ -228,15 +251,35 @@
     [self sendSyncRequest:request expectResponse: FALSE];
 }
 
-- (void)disconnect {
-    if (self.sock >= 0) {
-        close(self.sock);
-        self.sock = -1;
+- (NSDictionary *)requestScanout {
+    if (!_connected)
+        return nil;
+
+    long requestId = [self generateRequestId];
+    NSDictionary *request = @{
+        @"type": @"request",
+        @"id": @(requestId),
+        @"action": @"get_framebuffer"
+    };
+
+    NSDictionary *response = [self sendSyncRequest:request expectResponse:YES];
+    if (!response) {
+        return nil;
     }
+
+    if (![response[@"status"] isEqualToString:@"success"]) {
+        NSLog(@"Server responded with error");
+        return nil;
+    }
+
+    return response[@"data"];
 }
 
 - (void)requestResize: (int)x y: (int)y
 {
+    if (!_connected)
+        return;
+
     long requestId = [self generateRequestId];
     NSDictionary *request = @{
         @"type": @"request",
@@ -250,4 +293,16 @@
     [self sendSyncRequest:request expectResponse: FALSE];
 }
 
+- (void)disconnect {
+    if (self.wsi) {
+        lws_context_destroy(self.context);
+        self.context = NULL;
+        self.wsi = NULL;
+    }
+    [_messageQueue removeAllObjects];
+    _connected = false;
+    NSLog(@"Disconnected.");
+}
+
 @end
+
