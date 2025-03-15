@@ -15,6 +15,8 @@
 #import <Foundation/Foundation.h>
 #import "SocketClient.h"
 
+#define VM_SOCK_NAME    @"/tmp/vm_sock"
+
 @implementation ViewController
 {
     MTKView *_view;
@@ -132,7 +134,7 @@
 - (void) setCursor: (NSDictionary *)data
 {
     struct CursorScanout cursor;
-    
+
     NSString *shmName = data[@"shm_name"];
     NSLog(@"setCursor %@", shmName);
 
@@ -263,7 +265,7 @@
     bzero(&_scanout, sizeof(_scanout));
     
     _sock = [[SocketClient alloc] init];
-    if (![_sock connectToSocket: @"/tmp/6666"]) {
+    if (![_sock connectToSocket: VM_SOCK_NAME]) {
         NSLog(@"Failed to connect");
         return;
     }

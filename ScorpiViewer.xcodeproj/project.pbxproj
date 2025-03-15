@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AA2488142D76266900466800 /* libwebsockets.a in Frameworks */ = {isa = PBXBuildFile; fileRef = AA2488132D76266900466800 /* libwebsockets.a */; };
+		AA7F97802D85944600D976F6 /* libwebsockets.a in Frameworks */ = {isa = PBXBuildFile; fileRef = AA7F977F2D8593C200D976F6 /* libwebsockets.a */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,7 +21,7 @@
 		AA2488022D7216B000466800 /* stream_device.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = stream_device.h; sourceTree = "<group>"; };
 		AA2488032D7216B000466800 /* types.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = types.h; sourceTree = "<group>"; };
 		AA2488042D7216B000466800 /* vd_agent.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = vd_agent.h; sourceTree = "<group>"; };
-		AA2488132D76266900466800 /* libwebsockets.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libwebsockets.a; sourceTree = "<group>"; };
+		AA7F977F2D8593C200D976F6 /* libwebsockets.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libwebsockets.a; path = libs/libwebsockets.a; sourceTree = "<group>"; };
 		AAA21D992D39A0F700CEE3AC /* ScorpiViewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScorpiViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -51,7 +51,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AA2488142D76266900466800 /* libwebsockets.a in Frameworks */,
+				AA7F97802D85944600D976F6 /* libwebsockets.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -86,7 +86,7 @@
 		AA2488072D7623DC00466800 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				AA2488132D76266900466800 /* libwebsockets.a */,
+				AA7F977F2D8593C200D976F6 /* libwebsockets.a */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -330,6 +330,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)",
+					"$(PROJECT_DIR)/libs",
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "org.fuse-t.ScorpiViewer";
@@ -364,6 +365,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)",
+					"$(PROJECT_DIR)/libs",
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "org.fuse-t.ScorpiViewer";

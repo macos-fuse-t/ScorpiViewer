@@ -19,7 +19,7 @@
 @property (nonatomic, assign) atomic_long atomic_request_id;
 @property (nonatomic, strong) NSString *serverSocketPath;
 @property (nonatomic, strong) NSMutableArray *messageQueue;
-@property (nonatomic, assign) bool connected;
+@property (atomic, assign) bool connected;
 @end
 
 @implementation SocketClient
@@ -154,7 +154,8 @@ static const struct lws_protocols protocols[] = {
     }
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        while (1) {
+        self.connected = true;
+        while (self.connected) {
             lws_service(self.context, 100);
         }
     });
@@ -294,13 +295,14 @@ static const struct lws_protocols protocols[] = {
 }
 
 - (void)disconnect {
+    _connected = false;
     if (self.wsi) {
+        lws_cancel_service(self.context);
         lws_context_destroy(self.context);
         self.context = NULL;
         self.wsi = NULL;
     }
     [_messageQueue removeAllObjects];
-    _connected = false;
     NSLog(@"Disconnected.");
     
     dispatch_async(dispatch_get_main_queue(), ^{
