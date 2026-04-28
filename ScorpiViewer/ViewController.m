@@ -17,6 +17,22 @@
 
 #define VM_SOCK_NAME    @"/tmp/vm_sock"
 
+static NSString *
+ScorpiVMSocketPath(void)
+{
+    NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
+    if (arguments.count > 1 && arguments[1].length > 0) {
+        return arguments[1];
+    }
+
+    NSString *envSocket = [[[NSProcessInfo processInfo] environment] objectForKey:@"SCORPI_VM_SOCKET"];
+    if (envSocket.length > 0) {
+        return envSocket;
+    }
+
+    return VM_SOCK_NAME;
+}
+
 @implementation ViewController
 {
     MTKView *_view;
@@ -265,13 +281,19 @@
     bzero(&_scanout, sizeof(_scanout));
     
     _sock = [[SocketClient alloc] init];
-    if (![_sock connectToSocket: VM_SOCK_NAME]) {
+    if (![_sock connectToSocket: ScorpiVMSocketPath()]) {
         NSLog(@"Failed to connect");
         return;
     }
     _sock.delegate = self;
 
-    _view = (MTKView *)self.view;
+    if ([self.view isKindOfClass:[MTKView class]]) {
+        _view = (MTKView *)self.view;
+    } else {
+        _view = [[MTKView alloc] initWithFrame:self.view.bounds];
+        _view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        self.view = _view;
+    }
     _view.device = MTLCreateSystemDefaultDevice();
 
     if(!_view.device)
