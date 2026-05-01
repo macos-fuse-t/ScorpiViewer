@@ -277,6 +277,9 @@ ScorpiVMSocketPath(void)
 - (void)viewDidAppear
 {
     [super viewDidAppear];
+
+    self.view.wantsLayer = YES;
+    self.view.layer.backgroundColor = NSColor.blackColor.CGColor;
     
     bzero(&_scanout, sizeof(_scanout));
     
@@ -420,23 +423,33 @@ ScorpiVMSocketPath(void)
     _cursorHidden = FALSE;
 }
 
-- (NSPoint)locationFromEvent:(NSEvent *)event {
+- (BOOL)locationFromEvent:(NSEvent *)event point:(NSPoint *)point {
     NSPoint locationInWindow = [event locationInWindow];
     NSPoint locationInView = [self.view convertPoint:locationInWindow fromView:nil];
+    NSRect bounds = self.view.bounds;
+
+    if (!NSPointInRect(locationInView, bounds))
+        return NO;
 
     locationInView.x *= _scaling;
     locationInView.y *= _scaling;
+    locationInView.y = (bounds.size.height * _scaling) - locationInView.y;
 
-    NSRect contentFrame = self.view.bounds;
-    locationInView.y = (contentFrame.size.height * _scaling) - locationInView.y;
+    CGFloat maxX = bounds.size.width * _scaling - 1;
+    CGFloat maxY = bounds.size.height * _scaling - 1;
+    if (maxX < 0 || maxY < 0)
+        return NO;
+    locationInView.x = MIN(MAX(locationInView.x, 0), maxX);
+    locationInView.y = MIN(MAX(locationInView.y, 0), maxY);
 
-    return locationInView;
+    *point = locationInView;
+    return YES;
 }
 
 - (void)mouseMoved:(NSEvent *)event {
-   
-    NSPoint locationInView = [self locationFromEvent: event];
-    if (locationInView.x < 0 || locationInView.y < 0)
+
+    NSPoint locationInView;
+    if (![self locationFromEvent:event point:&locationInView])
         return;
     [_sock sendMouseEventWithButton:_buttonPressed
                                       x:(int)locationInView.x
@@ -444,39 +457,51 @@ ScorpiVMSocketPath(void)
 }
 
 - (void)mouseDragged:(NSEvent *)event {
-    NSPoint locationInView = [self locationFromEvent: event];
+    NSPoint locationInView;
+    if (![self locationFromEvent:event point:&locationInView])
+        return;
     [_sock sendMouseEventWithButton:1
                                 x:(int)locationInView.x
                                 y:(int)locationInView.y];
 }
 
 - (void)mouseDown:(NSEvent *)event {
-    NSPoint location = [self locationFromEvent: event];
+    NSPoint location;
+    if (![self locationFromEvent:event point:&location])
+        return;
     _buttonPressed |= 1;
     [_sock sendMouseEventWithButton:_buttonPressed x:(int)location.x y:(int)location.y];
 }
 
 - (void)mouseUp:(NSEvent *)event {
-    NSPoint location = [self locationFromEvent: event];
+    NSPoint location;
+    if (![self locationFromEvent:event point:&location])
+        return;
     _buttonPressed &= ~1;
     [_sock sendMouseEventWithButton:0 x:(int)location.x y:(int)location.y];
 }
 
 - (void)rightMouseDown:(NSEvent *)event {
-    NSPoint location = [self locationFromEvent: event];
+    NSPoint location;
+    if (![self locationFromEvent:event point:&location])
+        return;
     _buttonPressed |= 2;
     [_sock sendMouseEventWithButton:_buttonPressed x:(int)location.x y:(int)location.y];
 }
 
 - (void)rightMouseUp:(NSEvent *)event {
-    NSPoint location = [self locationFromEvent: event];
+    NSPoint location;
+    if (![self locationFromEvent:event point:&location])
+        return;
     _buttonPressed &= ~2;
     [_sock sendMouseEventWithButton: 0 x:(int)location.x y:(int)location.y];
 }
 
 - (void)scrollWheel:(NSEvent *)event {
     //NSLog(@"Scrolled: deltaX = %f, deltaY = %f", event.scrollingDeltaX, event.scrollingDeltaY);
-    NSPoint location = [self locationFromEvent: event];
+    NSPoint location;
+    if (![self locationFromEvent:event point:&location])
+        return;
     if (event.scrollingDeltaY > 5)
         [_sock sendMouseEventWithButton:_buttonPressed | 8 x:(int)location.x y:(int)location.y];
     else if (event.scrollingDeltaY < -5)

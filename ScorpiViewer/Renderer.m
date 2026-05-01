@@ -27,6 +27,7 @@
         
         view.preferredFramesPerSecond = 60;
         view.enableSetNeedsDisplay = NO;
+        view.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
         view.delegate = self;
         
         _shouldRender = NO;
@@ -136,29 +137,26 @@
 
 - (void)drawInMTKView:(MTKView *)view {
     dispatch_semaphore_wait(_renderSemaphore, DISPATCH_TIME_FOREVER);
-    
-    if (!_shouldRender || !_texture || !_scanout.base_ptr) {
-        dispatch_semaphore_signal(_renderSemaphore);
-        return;
-    }
-    
-    if (_scanout.redrawOnTimer)
-        [self _updateTexture];
-    
-    // Render
+
     MTLRenderPassDescriptor *passDescriptor = view.currentRenderPassDescriptor;
     if (!passDescriptor) {
         dispatch_semaphore_signal(_renderSemaphore);
         return;
     }
+    passDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
     
     id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
     id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:passDescriptor];
-    
-    [encoder setRenderPipelineState:_pipelineState];
-    [encoder setVertexBuffer:_vertexBuffer offset:0 atIndex:BufferIndexMeshPositions];
-    [encoder setFragmentTexture:_texture atIndex:TextureIndexColor];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:_numVertices];
+
+    if (_shouldRender && _texture && _scanout.base_ptr) {
+        if (_scanout.redrawOnTimer)
+            [self _updateTexture];
+
+        [encoder setRenderPipelineState:_pipelineState];
+        [encoder setVertexBuffer:_vertexBuffer offset:0 atIndex:BufferIndexMeshPositions];
+        [encoder setFragmentTexture:_texture atIndex:TextureIndexColor];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:_numVertices];
+    }
     
     [encoder endEncoding];
     [commandBuffer presentDrawable:view.currentDrawable];
