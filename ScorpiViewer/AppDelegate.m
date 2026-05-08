@@ -14,7 +14,10 @@
 @implementation AppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
-    // Insert code here to initialize your application
+    NSImage *icon = [NSImage imageNamed:@"AppIcon"];
+    if (icon != nil) {
+        [NSApp setApplicationIconImage:icon];
+    }
 }
 
 - (void)applicationWillTerminate:(NSNotification *)aNotification {
