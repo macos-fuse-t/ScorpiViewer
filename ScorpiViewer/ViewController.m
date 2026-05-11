@@ -49,6 +49,36 @@ ScorpiVMSocketPath(void)
     bool _hdpi;
 }
 
+- (CGFloat)currentBackingScale
+{
+    if (!_hdpi)
+        return 1.0;
+
+    NSWindow *window = self.view.window;
+    if (window && window.backingScaleFactor > 0)
+        return window.backingScaleFactor;
+
+    NSScreen *screen = window.screen ?: [NSScreen mainScreen];
+    if (screen && screen.backingScaleFactor > 0)
+        return screen.backingScaleFactor;
+
+    return 1.0;
+}
+
+- (void)updateBackingScale
+{
+    _scaling = [self currentBackingScale];
+}
+
+- (NSSize)viewPixelSize
+{
+    [self updateBackingScale];
+
+    NSRect bounds = self.view.bounds;
+    return NSMakeSize(bounds.size.width * _scaling,
+                      bounds.size.height * _scaling);
+}
+
 - (void) notify: (NSDictionary *) data {
     NSString *event = data[@"event"];
     if ([event  isEqual: @"set_scanout"]) {
@@ -75,6 +105,7 @@ ScorpiVMSocketPath(void)
 - (void)resizeWindowToWidth:(int)width height:(int)height {
     NSWindow *window = self.view.window;
     if (window) {
+        [self updateBackingScale];
         CGFloat widthInPoints = width / _scaling;
         CGFloat heightInPoints = height / _scaling;
 
@@ -124,8 +155,9 @@ ScorpiVMSocketPath(void)
         return nil;
     }
 
+    CGFloat scale = _scaling > 0 ? _scaling : [self currentBackingScale];
     NSImage *image = [[NSImage alloc] initWithCGImage:imageRef
-                            size:NSMakeSize(width / _scaling, height / _scaling)];
+                            size:NSMakeSize(width / scale, height / scale)];
     CGImageRelease(imageRef);
 
     if (!image) {
@@ -134,7 +166,7 @@ ScorpiVMSocketPath(void)
     }
 
     NSCursor *customCursor = [[NSCursor alloc] initWithImage:image
-                            hotSpot:NSMakePoint(hotspotX, hotspotY)];
+                            hotSpot:NSMakePoint(hotspotX / scale, hotspotY / scale)];
     return customCursor;
 }
 
@@ -313,11 +345,7 @@ ScorpiVMSocketPath(void)
         [self initDisplay: data];
     }
 
-    // Get the screen's backing scale factor (e.g., 2.0 for Retina displays)
-    NSScreen *screen = self.view.window.screen ?: [NSScreen mainScreen];
-    _scaling = screen.backingScaleFactor;
-    if (!_hdpi)
-        _scaling = 1;
+    [self updateBackingScale];
     NSLog(@"Backing scale factor: %f", _scaling);
 
     // Get the current window and its frame
@@ -337,8 +365,8 @@ ScorpiVMSocketPath(void)
     [window setFrame:frame display:YES animate:NO];
 
     // Set the drawable size to match the view's bounds in real pixels
-    _view.drawableSize = CGSizeMake(_view.bounds.size.width * _scaling,
-                                    _view.bounds.size.height * _scaling);
+    NSSize pixelSize = [self viewPixelSize];
+    _view.drawableSize = CGSizeMake(pixelSize.width, pixelSize.height);
     
     [_renderer mtkView:_view drawableSizeWillChange:_view.drawableSize];
     _view.delegate = _renderer;
@@ -364,10 +392,12 @@ ScorpiVMSocketPath(void)
 
     [self.view addTrackingArea:_trackingArea];
     
-    NSWindow *window = self.view.window;
-    NSSize s = window.contentView.frame.size;
-    if (_scanout.enabled && (_scanout.width != s.width * _scaling || _scanout.height != s.height * _scaling)) {
-        [_sock requestResize:(int)(s.width * _scaling) y:(int)(s.height * _scaling)];
+    NSSize pixelSize = [self viewPixelSize];
+    _view.drawableSize = CGSizeMake(pixelSize.width, pixelSize.height);
+    int width = (int)pixelSize.width;
+    int height = (int)pixelSize.height;
+    if (_scanout.enabled && (_scanout.width != width || _scanout.height != height)) {
+        [_sock requestResize:width y:height];
     }
 }
 
@@ -431,12 +461,21 @@ ScorpiVMSocketPath(void)
     if (!NSPointInRect(locationInView, bounds))
         return NO;
 
-    locationInView.x *= _scaling;
-    locationInView.y *= _scaling;
-    locationInView.y = (bounds.size.height * _scaling) - locationInView.y;
+    if (bounds.size.width <= 0 || bounds.size.height <= 0)
+        return NO;
 
-    CGFloat maxX = bounds.size.width * _scaling - 1;
-    CGFloat maxY = bounds.size.height * _scaling - 1;
+    CGFloat targetWidth = _scanout.enabled && _scanout.width > 0
+        ? _scanout.width
+        : bounds.size.width * [self currentBackingScale];
+    CGFloat targetHeight = _scanout.enabled && _scanout.height > 0
+        ? _scanout.height
+        : bounds.size.height * [self currentBackingScale];
+
+    locationInView.x = ((locationInView.x - bounds.origin.x) / bounds.size.width) * targetWidth;
+    locationInView.y = (1.0 - ((locationInView.y - bounds.origin.y) / bounds.size.height)) * targetHeight;
+
+    CGFloat maxX = targetWidth - 1;
+    CGFloat maxY = targetHeight - 1;
     if (maxX < 0 || maxY < 0)
         return NO;
     locationInView.x = MIN(MAX(locationInView.x, 0), maxX);
