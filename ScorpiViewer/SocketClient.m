@@ -149,7 +149,7 @@ static const struct lws_protocols protocols[] = {
 
     self.wsi = lws_client_connect_via_info(&connect_info);
     if (!self.wsi) {
-        NSLog(@"Failed to connect to server");
+        NSLog(@"Failed to connect to server %@", socketPath);
         return NO;
     }
 

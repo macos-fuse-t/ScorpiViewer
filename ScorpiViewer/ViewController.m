@@ -21,13 +21,19 @@ static NSString *
 ScorpiVMSocketPath(void)
 {
     NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
-    if (arguments.count > 1 && arguments[1].length > 0) {
-        return arguments[1];
-    }
-
     NSString *envSocket = [[[NSProcessInfo processInfo] environment] objectForKey:@"SCORPI_VM_SOCKET"];
     if (envSocket.length > 0) {
         return envSocket;
+    }
+
+    for (NSUInteger i = 1; i < arguments.count; i++) {
+        NSString *arg = arguments[i];
+
+        if (arg.length == 0 || [arg hasPrefix:@"-"])
+            continue;
+
+        if ([arg hasPrefix:@"/"])
+            return arg;
     }
 
     return VM_SOCK_NAME;
