@@ -346,6 +346,9 @@ ScorpiVMSocketPath(void)
 
     _renderer = [[Renderer alloc] initWithMetalKitView:_view];
 
+    // Wake a powered-off guest display before asking for its framebuffer.
+    [_sock sendMouseEventWithButton:0 x:0 y:0];
+
     NSDictionary *data = [_sock requestScanout];
     if (data) {
         [self initDisplay: data];
@@ -379,9 +382,6 @@ ScorpiVMSocketPath(void)
 
     _view.window.acceptsMouseMovedEvents = YES;
     [_view.window makeFirstResponder: self];
-
-    // fake mouse event to wake up screen
-    //[_sock sendMouseEventWithButton:0 x:0 y:0];
 }
 
 - (void)viewDidLayout {
