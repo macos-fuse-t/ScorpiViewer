@@ -10,6 +10,7 @@
 #import "Network/Network.h"
 #import <fcntl.h>
 #import <sys/mman.h>
+#import <sys/stat.h>
 #import "hid.h"
 
 #import <Foundation/Foundation.h>
@@ -271,16 +272,18 @@ ScorpiVMSocketPath(void)
 
 - (void) setScanout: (NSDictionary *)data
 {
-    [self releaseScanout];
-    
     NSString *shmName = data[@"shm_name"];
-    _scanout.width = [data[@"width"] intValue];
-    _scanout.height = [data[@"height"] intValue];
-    _scanout.size = data[@"shm_size"] ? [data[@"shm_size"] longValue] : 0;
-    _scanout.stride = [data[@"stride"] intValue];
-    _scanout.pixelFormat = [data[@"format"] intValue];
-    _scanout.redrawOnTimer = data[@"redrawOnTimer"] ?[data[@"redrawOnTimer"] boolValue] : false;
-    NSLog(@"setScanout: %d %d, format %d", _scanout.width, _scanout.height, _scanout.pixelFormat);
+    struct Scanout nextScanout;
+    struct stat shmStat;
+
+    bzero(&nextScanout, sizeof(nextScanout));
+    nextScanout.width = [data[@"width"] intValue];
+    nextScanout.height = [data[@"height"] intValue];
+    nextScanout.size = data[@"shm_size"] ? [data[@"shm_size"] longValue] : 0;
+    nextScanout.stride = [data[@"stride"] intValue];
+    nextScanout.pixelFormat = [data[@"format"] intValue];
+    nextScanout.redrawOnTimer = data[@"redrawOnTimer"] ?[data[@"redrawOnTimer"] boolValue] : false;
+    NSLog(@"setScanout: %d %d, format %d", nextScanout.width, nextScanout.height, nextScanout.pixelFormat);
 
     if (!shmName) {
         NSLog(@"Failed to retrieve shared memory name");
@@ -293,18 +296,43 @@ ScorpiVMSocketPath(void)
         return;
     }
 
-    if (!_scanout.size)
-        _scanout.size = roundup2(_scanout.width * 4, 32) * _scanout.height;
-    _scanout.base_ptr =  mmap(NULL, _scanout.size, PROT_READ, MAP_SHARED, shmFd, 0);
+    if (fstat(shmFd, &shmStat) != 0) {
+        NSLog(@"fstat failed for scanout shared memory");
+        close(shmFd);
+        return;
+    }
+
+    if (!nextScanout.size)
+        nextScanout.size = roundup2(nextScanout.width * 4, 32) * nextScanout.height;
+    nextScanout.shm_dev = shmStat.st_dev;
+    nextScanout.shm_ino = shmStat.st_ino;
+
+    if (_scanout.enabled &&
+        _scanout.base_ptr &&
+        _scanout.shm_dev == nextScanout.shm_dev &&
+        _scanout.shm_ino == nextScanout.shm_ino &&
+        _scanout.width == nextScanout.width &&
+        _scanout.height == nextScanout.height &&
+        _scanout.stride == nextScanout.stride &&
+        _scanout.pixelFormat == nextScanout.pixelFormat &&
+        _scanout.size == nextScanout.size &&
+        _scanout.redrawOnTimer == nextScanout.redrawOnTimer) {
+        close(shmFd);
+        return;
+    }
+
+    [self releaseScanout];
+
+    nextScanout.base_ptr =  mmap(NULL, nextScanout.size, PROT_READ, MAP_SHARED, shmFd, 0);
     
     close(shmFd);
 
-    if (_scanout.base_ptr == MAP_FAILED) {
+    if (nextScanout.base_ptr == MAP_FAILED) {
         NSLog(@"mmap failed");
-        bzero(&_scanout, sizeof(_scanout));
         return;
     }
-    _scanout.enabled = true;
+    nextScanout.enabled = true;
+    _scanout = nextScanout;
 
     [_renderer updateScanout: _scanout];
     dispatch_async(dispatch_get_main_queue(), ^{
