@@ -430,7 +430,8 @@ ScorpiVMSocketPath(void)
     _view.drawableSize = CGSizeMake(pixelSize.width, pixelSize.height);
     int width = (int)pixelSize.width;
     int height = (int)pixelSize.height;
-    if (_scanout.enabled && (_scanout.width != width || _scanout.height != height)) {
+    if (_scanout.enabled && !_scanout.redrawOnTimer &&
+        (_scanout.width != width || _scanout.height != height)) {
         [_sock requestResize:width y:height];
     }
 }
