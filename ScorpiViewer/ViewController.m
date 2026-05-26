@@ -54,6 +54,8 @@ ScorpiVMSocketPath(void)
     NSTrackingArea *_trackingArea;
     float _scaling;
     bool _hdpi;
+    bool _programmaticResize;
+    bool _resizeRequestsEnabled;
 }
 
 - (CGFloat)currentBackingScale
@@ -121,7 +123,12 @@ ScorpiVMSocketPath(void)
         NSRect frameRect = [window frameRectForContentRect:contentRect];
         frameRect.origin = window.frame.origin;
 
+        _programmaticResize = true;
         [window setFrame:frameRect display:YES animate:NO];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_programmaticResize = false;
+            self->_resizeRequestsEnabled = true;
+        });
         //[window setStyleMask:window.styleMask & ~NSWindowStyleMaskResizable];
 
         NSLog(@"New window frame: %@", NSStringFromRect(window.frame));
@@ -348,7 +355,9 @@ ScorpiVMSocketPath(void)
     self.view.layer.backgroundColor = NSColor.blackColor.CGColor;
     
     bzero(&_scanout, sizeof(_scanout));
-    
+    _programmaticResize = false;
+    _resizeRequestsEnabled = false;
+
     _sock = [[SocketClient alloc] init];
     if (![_sock connectToSocket: ScorpiVMSocketPath()]) {
         NSLog(@"Failed to connect");
@@ -385,21 +394,11 @@ ScorpiVMSocketPath(void)
     [self updateBackingScale];
     NSLog(@"Backing scale factor: %f", _scaling);
 
-    // Get the current window and its frame
     NSWindow *window = self.view.window;
     if (!window) {
         NSLog(@"Window is nil. Ensure the view is attached to a window.");
         return;
     }
-
-    NSRect frame = window.frame;
-
-    // Adjust the window size to real pixels
-    frame.size.width /= _scaling;
-    frame.size.height /= _scaling;
-
-    // Apply the new frame to the window
-    [window setFrame:frame display:YES animate:NO];
 
     // Set the drawable size to match the view's bounds in real pixels
     NSSize pixelSize = [self viewPixelSize];
@@ -430,7 +429,8 @@ ScorpiVMSocketPath(void)
     _view.drawableSize = CGSizeMake(pixelSize.width, pixelSize.height);
     int width = (int)pixelSize.width;
     int height = (int)pixelSize.height;
-    if (_scanout.enabled && !_scanout.redrawOnTimer &&
+    if (_resizeRequestsEnabled && !_programmaticResize &&
+        _scanout.enabled && !_scanout.redrawOnTimer &&
         (_scanout.width != width || _scanout.height != height)) {
         [_sock requestResize:width y:height];
     }
