@@ -17,6 +17,8 @@
 #import "SocketClient.h"
 
 #define VM_SOCK_NAME    @"/tmp/vm_sock"
+#define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
+#define VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM 67
 
 static NSString *
 ScorpiVMSocketPath(void)
@@ -49,6 +51,8 @@ ScorpiVMSocketPath(void)
     struct Scanout _scanout;
     bool _cursorEnabled;
     NSCursor *_currentCursor;
+    NSCursor *_emptyCursor;
+    NSUInteger _cursorGeneration;
     bool _cursorHidden;
     bool _hardwareCursor;
     NSTrackingArea *_trackingArea;
@@ -97,10 +101,12 @@ ScorpiVMSocketPath(void)
     } else if ([event  isEqual: @"update_scanout"]) {
         [_renderer updateTexture];
     } else if ([event  isEqual: @"update_cursor"]) {
+        _hardwareCursor = true;
         [self setCursor: data[@"data"]];
     } else if ([event  isEqual: @"move_cursor"]) {
         [self moveCursor: data[@"data"]];
     } else if ([event  isEqual: @"hide_cursor"]) {
+        _hardwareCursor = true;
         [self hideCursor];
     }
 }
@@ -141,14 +147,53 @@ ScorpiVMSocketPath(void)
 }
 
 - (NSCursor*) createCursorFromBuffer: (const uint8_t *) buffer width: (int) width height: (int) height
+                              stride: (int) stride format: (int) format
                             hotspotX: (int) hotspotX hotspotY: (int) hotspotY
 {
+    if (!buffer || width <= 0 || height <= 0)
+        return nil;
+
+    if (stride < width * 4)
+        stride = width * 4;
+
+    NSMutableData *rgbaData = [NSMutableData dataWithLength:(NSUInteger)width * height * 4];
+    uint8_t *rgba = (uint8_t *)rgbaData.mutableBytes;
+    for (int y = 0; y < height; y++) {
+        const uint8_t *src = buffer + ((size_t)y * stride);
+        uint8_t *dst = rgba + ((size_t)y * width * 4);
+        for (int x = 0; x < width; x++) {
+            uint8_t r;
+            uint8_t g;
+            uint8_t b;
+            uint8_t a;
+            const uint8_t *pixel = src + ((size_t)x * 4);
+
+            if (format == VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM) {
+                b = pixel[0];
+                g = pixel[1];
+                r = pixel[2];
+                a = pixel[3];
+            } else {
+                r = pixel[0];
+                g = pixel[1];
+                b = pixel[2];
+                a = pixel[3];
+            }
+
+            dst[0] = (uint8_t)(((uint16_t)r * a) / 255);
+            dst[1] = (uint8_t)(((uint16_t)g * a) / 255);
+            dst[2] = (uint8_t)(((uint16_t)b * a) / 255);
+            dst[3] = a;
+            dst += 4;
+        }
+    }
+
     // Create a CGColorSpace for RGBA
     CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     
     // Create a CGContext from the buffer
     CGContextRef context = CGBitmapContextCreate(
-        (void *)buffer, width, height, 8, width * 4, colorSpace,
+        rgba, width, height, 8, width * 4, colorSpace,
         kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
     );
 
@@ -184,29 +229,77 @@ ScorpiVMSocketPath(void)
     return customCursor;
 }
 
+- (NSCursor *)emptyCursor
+{
+    if (!_emptyCursor) {
+        NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(1, 1)];
+        _emptyCursor = [[NSCursor alloc] initWithImage:image hotSpot:NSZeroPoint];
+    }
+    return _emptyCursor;
+}
+
 - (void) hideCursor
 {
+    NSUInteger generation;
+
     NSLog(@"hideCursor");
-    if (!_hardwareCursor && !_cursorHidden) {
+    _cursorGeneration++;
+    generation = _cursorGeneration;
+    if (_hardwareCursor) {
+        _cursorEnabled = false;
+        _currentCursor = [self emptyCursor];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self->_cursorGeneration)
+                return;
+            [self showCursorIfHidden];
+            [self->_currentCursor set];
+        });
+    } else if (!_cursorHidden) {
         [NSCursor hide];
         _cursorHidden = TRUE;
+    }
+}
+
+- (void) showCursorIfHidden
+{
+    if (_cursorHidden) {
+        [NSCursor unhide];
+        _cursorHidden = FALSE;
     }
 }
 
 - (void) setCursor: (NSDictionary *)data
 {
     struct CursorScanout cursor;
+    NSUInteger generation;
+
+    if (!_hardwareCursor)
+        return;
+    _cursorGeneration++;
+    generation = _cursorGeneration;
+    [self showCursorIfHidden];
 
     NSString *shmName = data[@"shm_name"];
     NSLog(@"setCursor %@", shmName);
 
     cursor.width = [data[@"width"] intValue];
     cursor.height = [data[@"height"] intValue];
+    cursor.stride = data[@"stride"] ? [data[@"stride"] intValue] : cursor.width * 4;
+    cursor.pixelFormat = data[@"format"] ? [data[@"format"] intValue] : VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM;
     cursor.hot_x = [data[@"hot_x"] intValue];
     cursor.hot_y = [data[@"hot_y"] intValue];
     
     if (!shmName) {
         NSLog(@"Failed to retrieve shared memory name");
+        return;
+    }
+
+    if (cursor.width <= 0 || cursor.height <= 0) {
+        NSLog(@"Invalid cursor size %dx%d", cursor.width, cursor.height);
+        return;
+    }
+    if (cursor.stride < cursor.width * 4) {
+        NSLog(@"Invalid cursor stride %d for width %d", cursor.stride, cursor.width);
         return;
     }
 
@@ -216,7 +309,7 @@ ScorpiVMSocketPath(void)
         return;
     }
 
-    cursor.size = cursor.width * cursor.height * 4;
+    cursor.size = (size_t)cursor.stride * cursor.height;
     cursor.base_ptr = mmap(NULL, cursor.size, PROT_READ, MAP_SHARED, shmFd, 0);
     
     close(shmFd);
@@ -226,16 +319,24 @@ ScorpiVMSocketPath(void)
         return;
     }
 
-    _hardwareCursor = TRUE;
     _cursorEnabled = true;
     NSCursor *nextCursor = [self createCursorFromBuffer:cursor.base_ptr
                             width: cursor.width
                             height:cursor.height
+                            stride:cursor.stride
+                            format:cursor.pixelFormat
                             hotspotX:cursor.hot_x
                             hotspotY:cursor.hot_y];
     munmap(cursor.base_ptr, cursor.size);
+
+    if (!nextCursor) {
+        return;
+    }
     
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (generation != self->_cursorGeneration)
+            return;
+        [self showCursorIfHidden];
         [nextCursor set];
         self->_currentCursor = nextCursor;
     });
@@ -259,9 +360,15 @@ ScorpiVMSocketPath(void)
 {
     _hdpi = data[@"hdpi"] ? [ data[@"hdpi"] boolValue] : false;
 
-    _hardwareCursor = data[@"hardware_mouse"] ? [ data[@"hardware_mouse"] boolValue] : false;
-    if (!_hardwareCursor)
+    id hardwareCursor = data[@"hardware_mouse"];
+    _hardwareCursor = hardwareCursor ? [hardwareCursor boolValue] : true;
+    if (_hardwareCursor) {
+        [self showCursorIfHidden];
+        if (!_currentCursor)
+            [[NSCursor arrowCursor] set];
+    } else {
         [self hideCursor];
+    }
     NSDictionary *scanout = data[@"scanout"];
     if (scanout) {
         if (scanout[@"shm_name"] && ![scanout[@"shm_name"] isEqual: @""])
@@ -270,7 +377,9 @@ ScorpiVMSocketPath(void)
 
     NSDictionary *mouse_scanout = data[@"mouse_scanout"];
     if (mouse_scanout) {
-        if (mouse_scanout[@"shm_name"] && ![mouse_scanout[@"shm_name"]  isEqual: @""])
+        if (_hardwareCursor &&
+            mouse_scanout[@"shm_name"] &&
+            ![mouse_scanout[@"shm_name"]  isEqual: @""])
             [self setCursor: mouse_scanout];
         else
             [self hideCursor];
@@ -474,7 +583,9 @@ ScorpiVMSocketPath(void)
 }
 
 - (void)mouseEntered:(NSEvent *)event {
-    if (!_hardwareCursor && !_cursorHidden && _scanout.enabled) {
+    if (_hardwareCursor) {
+        [self showCursorIfHidden];
+    } else if (!_cursorHidden && _scanout.enabled) {
         _cursorHidden = TRUE;
         [NSCursor hide];
     }

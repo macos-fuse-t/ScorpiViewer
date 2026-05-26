@@ -28,6 +28,7 @@ struct CursorScanout
 {
     int width;
     int height;
+    int stride;
     int hot_x;
     int hot_y;
     int pixelFormat;
