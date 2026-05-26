@@ -18,8 +18,6 @@ struct Scanout
     int pixelFormat;
     void *base_ptr;
     size_t size;
-    dev_t shm_dev;
-    ino_t shm_ino;
     bool redrawOnTimer;
     bool enabled;
 };

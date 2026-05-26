@@ -56,6 +56,7 @@ ScorpiVMSocketPath(void)
     bool _cursorHidden;
     bool _hardwareCursor;
     NSTrackingArea *_trackingArea;
+    NSString *_scanoutShmName;
     float _scaling;
     bool _hdpi;
     bool _programmaticResize;
@@ -353,6 +354,7 @@ ScorpiVMSocketPath(void)
         [_renderer stop];
         munmap(_scanout.base_ptr, _scanout.size);
         bzero(&_scanout, sizeof(_scanout));
+        _scanoutShmName = nil;
     }
 }
 
@@ -390,7 +392,6 @@ ScorpiVMSocketPath(void)
 {
     NSString *shmName = data[@"shm_name"];
     struct Scanout nextScanout;
-    struct stat shmStat;
 
     bzero(&nextScanout, sizeof(nextScanout));
     nextScanout.width = [data[@"width"] intValue];
@@ -412,21 +413,12 @@ ScorpiVMSocketPath(void)
         return;
     }
 
-    if (fstat(shmFd, &shmStat) != 0) {
-        NSLog(@"fstat failed for scanout shared memory");
-        close(shmFd);
-        return;
-    }
-
     if (!nextScanout.size)
         nextScanout.size = roundup2(nextScanout.width * 4, 32) * nextScanout.height;
-    nextScanout.shm_dev = shmStat.st_dev;
-    nextScanout.shm_ino = shmStat.st_ino;
 
     if (_scanout.enabled &&
         _scanout.base_ptr &&
-        _scanout.shm_dev == nextScanout.shm_dev &&
-        _scanout.shm_ino == nextScanout.shm_ino &&
+        [_scanoutShmName isEqualToString:shmName] &&
         _scanout.width == nextScanout.width &&
         _scanout.height == nextScanout.height &&
         _scanout.stride == nextScanout.stride &&
@@ -434,8 +426,13 @@ ScorpiVMSocketPath(void)
         _scanout.size == nextScanout.size &&
         _scanout.redrawOnTimer == nextScanout.redrawOnTimer) {
         close(shmFd);
+        [_renderer updateTexture];
         return;
     }
+
+    BOOL resizeNeeded = !_scanout.enabled ||
+        _scanout.width != nextScanout.width ||
+        _scanout.height != nextScanout.height;
 
     [self releaseScanout];
 
@@ -449,11 +446,14 @@ ScorpiVMSocketPath(void)
     }
     nextScanout.enabled = true;
     _scanout = nextScanout;
+    _scanoutShmName = [shmName copy];
 
     [_renderer updateScanout: _scanout];
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self resizeWindowToWidth:self->_scanout.width height:self->_scanout.height];
-    });
+    if (resizeNeeded) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self resizeWindowToWidth:self->_scanout.width height:self->_scanout.height];
+        });
+    }
 }
 
 - (void)viewDidAppear
