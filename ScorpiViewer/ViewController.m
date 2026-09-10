@@ -49,6 +49,9 @@ ScorpiVMSocketPath(void)
     int _buttonPressed;
     SocketClient *_sock;
     struct Scanout _scanout;
+    bool _displaySurfaceActive;
+    int _displaySurfaceWidth;
+    int _displaySurfaceHeight;
     bool _cursorEnabled;
     NSCursor *_currentCursor;
     NSCursor *_emptyCursor;
@@ -63,9 +66,36 @@ ScorpiVMSocketPath(void)
     bool _resizeRequestsEnabled;
 }
 
+- (BOOL)acceptsFirstResponder
+{
+    return YES;
+}
+
+- (BOOL)becomeFirstResponder
+{
+    NSWindow *window = self.view.window;
+    if (window)
+        window.acceptsMouseMovedEvents = YES;
+    return YES;
+}
+
+- (void)activateInputResponder
+{
+    NSWindow *window = self.view.window;
+    if (!window)
+        return;
+
+    window.acceptsMouseMovedEvents = YES;
+    if (window.firstResponder != self)
+        [window makeFirstResponder:self];
+}
+
 - (CGFloat)currentBackingScale
 {
-    if (!_hdpi)
+    // Legacy shared-memory scanout uses the guest's HDPI policy. An
+    // IOSurface, however, is already expressed in host backing pixels and
+    // must always be converted through the local window backing scale.
+    if (!_hdpi && !_displaySurfaceActive)
         return 1.0;
 
     NSWindow *window = self.view.window;
@@ -99,6 +129,13 @@ ScorpiVMSocketPath(void)
         [self setScanout: data[@"data"]];
     } else if ([event  isEqual: @"unset_scanout"]) {
         [self releaseScanout];
+    } else if ([event isEqual: @"set_display_surface"]) {
+        [self setDisplaySurface:data[@"data"]];
+    } else if ([event isEqual: @"unset_display_surface"]) {
+        _displaySurfaceActive = false;
+        _displaySurfaceWidth = 0;
+        _displaySurfaceHeight = 0;
+        [_renderer clearDisplaySurface];
     } else if ([event  isEqual: @"update_scanout"]) {
         [_renderer updateTexture];
     } else if ([event  isEqual: @"update_cursor"]) {
@@ -112,8 +149,55 @@ ScorpiVMSocketPath(void)
     }
 }
 
+- (void)setDisplaySurface:(NSDictionary *)data
+{
+    if (!data)
+        return;
+
+    uint64_t surfaceID = [data[@"surface_id"] unsignedLongLongValue];
+    int width = [data[@"width"] intValue];
+    int height = [data[@"height"] intValue];
+    int format = data[@"format"] ? [data[@"format"] intValue] :
+        VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+
+    if (surfaceID == 0 || width <= 0 || height <= 0) {
+        NSLog(@"Invalid display surface id=%llu size=%dx%d",
+              surfaceID, width, height);
+        return;
+    }
+
+    BOOL resizeNeeded = !_displaySurfaceActive ||
+        _displaySurfaceWidth != width ||
+        _displaySurfaceHeight != height;
+
+    [self releaseScanout];
+    _displaySurfaceActive = true;
+    _displaySurfaceWidth = width;
+    _displaySurfaceHeight = height;
+    [_renderer updateDisplaySurfaceWithID:surfaceID
+                                    width:width
+                                   height:height
+                                   format:format];
+
+    if (resizeNeeded) {
+        // Let AppKit finish attaching the window to its screen before
+        // converting the IOSurface's pixel dimensions to content points.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!self->_displaySurfaceActive ||
+                self->_displaySurfaceWidth != width ||
+                self->_displaySurfaceHeight != height) {
+                return;
+            }
+            [self resizeWindowToWidth:width height:height];
+        });
+    }
+}
+
 - (void) onDisconnected {
     [self releaseScanout];
+    _displaySurfaceActive = false;
+    _displaySurfaceWidth = 0;
+    _displaySurfaceHeight = 0;
     [_renderer stop];
     [NSApp terminate:self];
 }
@@ -351,7 +435,8 @@ ScorpiVMSocketPath(void)
 - (void) releaseScanout
 {
     if (_scanout.enabled && _scanout.base_ptr) {
-        [_renderer stop];
+        if (!_displaySurfaceActive)
+            [_renderer stop];
         munmap(_scanout.base_ptr, _scanout.size);
         bzero(&_scanout, sizeof(_scanout));
         _scanoutShmName = nil;
@@ -371,10 +456,17 @@ ScorpiVMSocketPath(void)
     } else {
         [self hideCursor];
     }
-    NSDictionary *scanout = data[@"scanout"];
-    if (scanout) {
-        if (scanout[@"shm_name"] && ![scanout[@"shm_name"] isEqual: @""])
-            [self setScanout: scanout];
+    NSDictionary *displaySurface = data[@"display_surface"];
+    if (displaySurface &&
+        [displaySurface[@"active"] boolValue] &&
+        [displaySurface[@"surface_id"] unsignedLongLongValue] != 0) {
+        [self setDisplaySurface:displaySurface];
+    } else {
+        NSDictionary *scanout = data[@"scanout"];
+        if (scanout) {
+            if (scanout[@"shm_name"] && ![scanout[@"shm_name"] isEqual: @""])
+                [self setScanout: scanout];
+        }
     }
 
     NSDictionary *mouse_scanout = data[@"mouse_scanout"];
@@ -390,17 +482,57 @@ ScorpiVMSocketPath(void)
 
 - (void) setScanout: (NSDictionary *)data
 {
+    if (_displaySurfaceActive)
+        return;
+
     NSString *shmName = data[@"shm_name"];
     struct Scanout nextScanout;
 
     bzero(&nextScanout, sizeof(nextScanout));
     nextScanout.width = [data[@"width"] intValue];
     nextScanout.height = [data[@"height"] intValue];
+    nextScanout.backingWidth = data[@"backing_width"] ?
+        [data[@"backing_width"] intValue] : 0;
+    nextScanout.backingHeight = data[@"backing_height"] ?
+        [data[@"backing_height"] intValue] : 0;
     nextScanout.size = data[@"shm_size"] ? [data[@"shm_size"] longValue] : 0;
     nextScanout.stride = [data[@"stride"] intValue];
     nextScanout.pixelFormat = [data[@"format"] intValue];
     nextScanout.redrawOnTimer = data[@"redrawOnTimer"] ?[data[@"redrawOnTimer"] boolValue] : false;
     NSLog(@"setScanout: %d %d, format %d", nextScanout.width, nextScanout.height, nextScanout.pixelFormat);
+
+    if (nextScanout.width <= 0 || nextScanout.height <= 0) {
+        NSLog(@"Invalid scanout size %dx%d",
+              nextScanout.width, nextScanout.height);
+        return;
+    }
+    if (nextScanout.stride <= 0)
+        nextScanout.stride = roundup2(nextScanout.width * 4, 32);
+    if (nextScanout.stride < nextScanout.width * 4) {
+        NSLog(@"Invalid scanout stride %d for width %d",
+              nextScanout.stride, nextScanout.width);
+        return;
+    }
+    if (!nextScanout.size)
+        nextScanout.size =
+            (size_t)nextScanout.stride * nextScanout.height;
+    size_t minimumSize =
+        (size_t)nextScanout.stride * nextScanout.height;
+    if (nextScanout.height != 0 &&
+        minimumSize / (size_t)nextScanout.height !=
+            (size_t)nextScanout.stride) {
+        NSLog(@"Invalid scanout size overflow stride %d height %d",
+              nextScanout.stride, nextScanout.height);
+        return;
+    }
+    if (nextScanout.size < minimumSize) {
+        NSLog(@"Invalid scanout shm size %zu for %dx%d stride %d",
+              nextScanout.size,
+              nextScanout.width,
+              nextScanout.height,
+              nextScanout.stride);
+        return;
+    }
 
     if (!shmName) {
         NSLog(@"Failed to retrieve shared memory name");
@@ -413,14 +545,28 @@ ScorpiVMSocketPath(void)
         return;
     }
 
-    if (!nextScanout.size)
-        nextScanout.size = roundup2(nextScanout.width * 4, 32) * nextScanout.height;
+    struct stat shmStat;
+    if (fstat(shmFd, &shmStat) != 0) {
+        NSLog(@"fstat failed for shared memory %@", shmName);
+        close(shmFd);
+        return;
+    }
+    if (shmStat.st_size > 0 &&
+        (uint64_t)nextScanout.size > (uint64_t)shmStat.st_size) {
+        NSLog(@"Invalid scanout shm size %zu larger than object %lld",
+              nextScanout.size,
+              (long long)shmStat.st_size);
+        close(shmFd);
+        return;
+    }
 
     if (_scanout.enabled &&
         _scanout.base_ptr &&
         [_scanoutShmName isEqualToString:shmName] &&
         _scanout.width == nextScanout.width &&
         _scanout.height == nextScanout.height &&
+        _scanout.backingWidth == nextScanout.backingWidth &&
+        _scanout.backingHeight == nextScanout.backingHeight &&
         _scanout.stride == nextScanout.stride &&
         _scanout.pixelFormat == nextScanout.pixelFormat &&
         _scanout.size == nextScanout.size &&
@@ -464,6 +610,9 @@ ScorpiVMSocketPath(void)
     self.view.layer.backgroundColor = NSColor.blackColor.CGColor;
     
     bzero(&_scanout, sizeof(_scanout));
+    _displaySurfaceActive = false;
+    _displaySurfaceWidth = 0;
+    _displaySurfaceHeight = 0;
     _programmaticResize = false;
     _resizeRequestsEnabled = false;
 
@@ -516,8 +665,42 @@ ScorpiVMSocketPath(void)
     [_renderer mtkView:_view drawableSizeWillChange:_view.drawableSize];
     _view.delegate = _renderer;
 
-    _view.window.acceptsMouseMovedEvents = YES;
-    [_view.window makeFirstResponder: self];
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:NSWindowDidBecomeKeyNotification
+                                                  object:_view.window];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(windowDidBecomeKey:)
+                                                 name:NSWindowDidBecomeKeyNotification
+                                               object:_view.window];
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:NSWindowDidChangeBackingPropertiesNotification
+                                                  object:_view.window];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(windowDidChangeBackingProperties:)
+                                                 name:NSWindowDidChangeBackingPropertiesNotification
+                                               object:_view.window];
+    [self activateInputResponder];
+}
+
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)windowDidBecomeKey:(NSNotification *)notification
+{
+    if (notification.object == self.view.window)
+        [self activateInputResponder];
+}
+
+- (void)windowDidChangeBackingProperties:(NSNotification *)notification
+{
+    if (notification.object != self.view.window)
+        return;
+
+    [self updateBackingScale];
+    NSSize pixelSize = [self viewPixelSize];
+    _view.drawableSize = CGSizeMake(pixelSize.width, pixelSize.height);
 }
 
 - (void)viewDidLayout {
@@ -528,7 +711,8 @@ ScorpiVMSocketPath(void)
     }
 
     _trackingArea = [[NSTrackingArea alloc] initWithRect:self.view.bounds
-        options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways /*| NSTrackingInVisibleRect*/)
+        options:(NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved |
+                 NSTrackingActiveAlways /*| NSTrackingInVisibleRect*/)
         owner:self
         userInfo:nil];
 
@@ -546,17 +730,8 @@ ScorpiVMSocketPath(void)
 }
 
 
-- (void) send_event: (NSEvent *)event down: (bool) down {
+- (uint8_t)hidModifiersForEvent:(NSEvent *)event {
     uint8_t modifiers = 0;
-    // Map macOS keyCode to HID keycode
-    uint16_t macKeyCode = event.keyCode;
-    uint8_t hidKeyCode = macToHidKeyMap[macKeyCode];
-
-    if (hidKeyCode == 0) {
-        NSLog(@"Unmapped key: %d", macKeyCode);
-        return;
-    }
-
     // Translate modifier flags
     if (event.modifierFlags & NSEventModifierFlagControl) {
         modifiers |= 0x01; // Left Control
@@ -571,7 +746,25 @@ ScorpiVMSocketPath(void)
         modifiers |= 0x08; // Left Command
     }
 
-    [_sock sendKeyEventWithDown:down hidcode:hidKeyCode mods:modifiers];
+    return modifiers;
+}
+
+- (void)flagsChanged:(NSEvent *)event {
+    // AppKit sends modifier-only presses/releases here, not through keyUp.
+    // HID usage zero updates the modifier byte without changing held keys.
+    [_sock sendKeyEventWithDown:0 hidcode:0 mods:[self hidModifiersForEvent:event]];
+}
+
+- (void) send_event: (NSEvent *)event down: (bool) down {
+    uint16_t macKeyCode = event.keyCode;
+    if (macKeyCode >= sizeof(macToHidKeyMap) / sizeof(macToHidKeyMap[0]))
+        return;
+    uint8_t hidKeyCode = macToHidKeyMap[macKeyCode];
+    if (hidKeyCode == 0) {
+        NSLog(@"Unmapped key: %d", macKeyCode);
+        return;
+    }
+    [_sock sendKeyEventWithDown:down hidcode:hidKeyCode mods:[self hidModifiersForEvent:event]];
 }
 
 - (void) keyDown:(NSEvent *)event {
@@ -612,9 +805,13 @@ ScorpiVMSocketPath(void)
 
     CGFloat targetWidth = _scanout.enabled && _scanout.width > 0
         ? _scanout.width
+        : _displaySurfaceActive && _displaySurfaceWidth > 0
+        ? _displaySurfaceWidth
         : bounds.size.width * [self currentBackingScale];
     CGFloat targetHeight = _scanout.enabled && _scanout.height > 0
         ? _scanout.height
+        : _displaySurfaceActive && _displaySurfaceHeight > 0
+        ? _displaySurfaceHeight
         : bounds.size.height * [self currentBackingScale];
 
     locationInView.x = ((locationInView.x - bounds.origin.x) / bounds.size.width) * targetWidth;
@@ -651,6 +848,8 @@ ScorpiVMSocketPath(void)
 }
 
 - (void)mouseDown:(NSEvent *)event {
+    [self activateInputResponder];
+
     NSPoint location;
     if (![self locationFromEvent:event point:&location])
         return;
@@ -667,6 +866,8 @@ ScorpiVMSocketPath(void)
 }
 
 - (void)rightMouseDown:(NSEvent *)event {
+    [self activateInputResponder];
+
     NSPoint location;
     if (![self locationFromEvent:event point:&location])
         return;
