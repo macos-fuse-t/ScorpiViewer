@@ -64,6 +64,8 @@ ScorpiVMSocketPath(void)
     bool _hdpi;
     bool _programmaticResize;
     bool _resizeRequestsEnabled;
+    bool _pressedKeys[256];
+    uint8_t _hidModifiers;
 }
 
 - (BOOL)acceptsFirstResponder
@@ -77,6 +79,25 @@ ScorpiVMSocketPath(void)
     if (window)
         window.acceptsMouseMovedEvents = YES;
     return YES;
+}
+
+- (BOOL)resignFirstResponder
+{
+    [self releasePressedKeys];
+    return YES;
+}
+
+- (void)releasePressedKeys
+{
+    for (NSUInteger hid = 1; hid < sizeof(_pressedKeys) / sizeof(_pressedKeys[0]); hid++) {
+        if (_pressedKeys[hid]) {
+            [_sock sendKeyEventWithDown:0 hidcode:(uint8_t)hid mods:0];
+            _pressedKeys[hid] = false;
+        }
+    }
+    if (_hidModifiers)
+        [_sock sendKeyEventWithDown:0 hidcode:0 mods:0];
+    _hidModifiers = 0;
 }
 
 - (void)activateInputResponder
@@ -673,6 +694,13 @@ ScorpiVMSocketPath(void)
                                                  name:NSWindowDidBecomeKeyNotification
                                                object:_view.window];
     [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:NSWindowDidResignKeyNotification
+                                                  object:_view.window];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(windowDidResignKey:)
+                                                 name:NSWindowDidResignKeyNotification
+                                               object:_view.window];
+    [[NSNotificationCenter defaultCenter] removeObserver:self
                                                     name:NSWindowDidChangeBackingPropertiesNotification
                                                   object:_view.window];
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -691,6 +719,12 @@ ScorpiVMSocketPath(void)
 {
     if (notification.object == self.view.window)
         [self activateInputResponder];
+}
+
+- (void)windowDidResignKey:(NSNotification *)notification
+{
+    if (notification.object == self.view.window)
+        [self releasePressedKeys];
 }
 
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification
@@ -752,7 +786,8 @@ ScorpiVMSocketPath(void)
 - (void)flagsChanged:(NSEvent *)event {
     // AppKit sends modifier-only presses/releases here, not through keyUp.
     // HID usage zero updates the modifier byte without changing held keys.
-    [_sock sendKeyEventWithDown:0 hidcode:0 mods:[self hidModifiersForEvent:event]];
+    _hidModifiers = [self hidModifiersForEvent:event];
+    [_sock sendKeyEventWithDown:0 hidcode:0 mods:_hidModifiers];
 }
 
 - (void) send_event: (NSEvent *)event down: (bool) down {
@@ -764,10 +799,18 @@ ScorpiVMSocketPath(void)
         NSLog(@"Unmapped key: %d", macKeyCode);
         return;
     }
-    [_sock sendKeyEventWithDown:down hidcode:hidKeyCode mods:[self hidModifiersForEvent:event]];
+    if (down && _pressedKeys[hidKeyCode])
+        return;
+    _pressedKeys[hidKeyCode] = down;
+    _hidModifiers = [self hidModifiersForEvent:event];
+    [_sock sendKeyEventWithDown:down hidcode:hidKeyCode mods:_hidModifiers];
 }
 
 - (void) keyDown:(NSEvent *)event {
+    // The guest implements repeat from the held HID state. In particular,
+    // ignore repeats after focus returns until a fresh physical key-down.
+    if (event.isARepeat)
+        return;
     [self send_event: event down: true];
 }
 
