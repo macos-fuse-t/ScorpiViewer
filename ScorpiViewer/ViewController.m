@@ -55,10 +55,11 @@ ScorpiVMSocketPath(void)
     bool _cursorEnabled;
     NSCursor *_currentCursor;
     NSCursor *_emptyCursor;
-    NSUInteger _cursorGeneration;
     bool _cursorHidden;
     bool _hardwareCursor;
+    bool _mouseInside;
     NSTrackingArea *_trackingArea;
+    NSTrackingArea *_cursorTrackingArea;
     NSString *_scanoutShmName;
     float _scaling;
     bool _hdpi;
@@ -157,6 +158,7 @@ ScorpiVMSocketPath(void)
         _displaySurfaceWidth = 0;
         _displaySurfaceHeight = 0;
         [_renderer clearDisplaySurface];
+        [self updateGuestCursor];
     } else if ([event  isEqual: @"update_scanout"]) {
         [_renderer updateTexture];
     } else if ([event  isEqual: @"update_cursor"]) {
@@ -199,6 +201,7 @@ ScorpiVMSocketPath(void)
                                     width:width
                                    height:height
                                    format:format];
+    [self updateGuestCursor];
 
     if (resizeNeeded) {
         // Let AppKit finish attaching the window to its screen before
@@ -215,6 +218,7 @@ ScorpiVMSocketPath(void)
 }
 
 - (void) onDisconnected {
+    [self restoreHostCursor];
     [self releaseScanout];
     _displaySurfaceActive = false;
     _displaySurfaceWidth = 0;
@@ -346,24 +350,10 @@ ScorpiVMSocketPath(void)
 
 - (void) hideCursor
 {
-    NSUInteger generation;
-
     NSLog(@"hideCursor");
-    _cursorGeneration++;
-    generation = _cursorGeneration;
-    if (_hardwareCursor) {
-        _cursorEnabled = false;
-        _currentCursor = [self emptyCursor];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (generation != self->_cursorGeneration)
-                return;
-            [self showCursorIfHidden];
-            [self->_currentCursor set];
-        });
-    } else if (!_cursorHidden) {
-        [NSCursor hide];
-        _cursorHidden = TRUE;
-    }
+    _cursorEnabled = false;
+    _currentCursor = [self emptyCursor];
+    [self updateGuestCursor];
 }
 
 - (void) showCursorIfHidden
@@ -374,16 +364,45 @@ ScorpiVMSocketPath(void)
     }
 }
 
+- (void)updateGuestCursor
+{
+    // AppKit can reset the cursor after mouseEntered. Apply it in
+    // cursorUpdate too, and never install a guest cursor outside the view.
+    if (!_mouseInside || (!_scanout.enabled && !_displaySurfaceActive)) {
+        [self showCursorIfHidden];
+        if (_mouseInside)
+            [[NSCursor arrowCursor] set];
+    } else if (_hardwareCursor) {
+        [self showCursorIfHidden];
+        [(_currentCursor ?: [self emptyCursor]) set];
+    } else if (!_cursorHidden) {
+        [NSCursor hide];
+        _cursorHidden = true;
+    }
+}
+
+- (void)refreshCursorLocation
+{
+    NSWindow *window = self.view.window;
+    NSPoint point = [self.view convertPoint:window.mouseLocationOutsideOfEventStream
+                                   fromView:nil];
+    _mouseInside = window.isKeyWindow && NSPointInRect(point, self.view.visibleRect);
+    [self updateGuestCursor];
+}
+
+- (void)restoreHostCursor
+{
+    _mouseInside = false;
+    [self showCursorIfHidden];
+    [[NSCursor arrowCursor] set];
+}
+
 - (void) setCursor: (NSDictionary *)data
 {
     struct CursorScanout cursor;
-    NSUInteger generation;
 
     if (!_hardwareCursor)
         return;
-    _cursorGeneration++;
-    generation = _cursorGeneration;
-    [self showCursorIfHidden];
 
     NSString *shmName = data[@"shm_name"];
     NSLog(@"setCursor %@", shmName);
@@ -425,7 +444,6 @@ ScorpiVMSocketPath(void)
         return;
     }
 
-    _cursorEnabled = true;
     NSCursor *nextCursor = [self createCursorFromBuffer:cursor.base_ptr
                             width: cursor.width
                             height:cursor.height
@@ -439,13 +457,9 @@ ScorpiVMSocketPath(void)
         return;
     }
     
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (generation != self->_cursorGeneration)
-            return;
-        [self showCursorIfHidden];
-        [nextCursor set];
-        self->_currentCursor = nextCursor;
-    });
+    _cursorEnabled = true;
+    _currentCursor = nextCursor;
+    [self updateGuestCursor];
 }
 
 - (void) moveCursor: (NSDictionary *)data
@@ -462,6 +476,7 @@ ScorpiVMSocketPath(void)
         bzero(&_scanout, sizeof(_scanout));
         _scanoutShmName = nil;
     }
+    [self updateGuestCursor];
 }
 
 - (void) initDisplay: (NSDictionary *)data
@@ -470,13 +485,6 @@ ScorpiVMSocketPath(void)
 
     id hardwareCursor = data[@"hardware_mouse"];
     _hardwareCursor = hardwareCursor ? [hardwareCursor boolValue] : true;
-    if (_hardwareCursor) {
-        [self showCursorIfHidden];
-        if (!_currentCursor)
-            [[NSCursor arrowCursor] set];
-    } else {
-        [self hideCursor];
-    }
     NSDictionary *displaySurface = data[@"display_surface"];
     if (displaySurface &&
         [displaySurface[@"active"] boolValue] &&
@@ -616,6 +624,7 @@ ScorpiVMSocketPath(void)
     _scanoutShmName = [shmName copy];
 
     [_renderer updateScanout: _scanout];
+    [self updateGuestCursor];
     if (resizeNeeded) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self resizeWindowToWidth:self->_scanout.width height:self->_scanout.height];
@@ -708,6 +717,7 @@ ScorpiVMSocketPath(void)
                                                  name:NSWindowDidChangeBackingPropertiesNotification
                                                object:_view.window];
     [self activateInputResponder];
+    [self refreshCursorLocation];
 }
 
 - (void)dealloc
@@ -717,14 +727,18 @@ ScorpiVMSocketPath(void)
 
 - (void)windowDidBecomeKey:(NSNotification *)notification
 {
-    if (notification.object == self.view.window)
+    if (notification.object == self.view.window) {
         [self activateInputResponder];
+        [self refreshCursorLocation];
+    }
 }
 
 - (void)windowDidResignKey:(NSNotification *)notification
 {
-    if (notification.object == self.view.window)
+    if (notification.object == self.view.window) {
         [self releasePressedKeys];
+        [self restoreHostCursor];
+    }
 }
 
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification
@@ -743,6 +757,8 @@ ScorpiVMSocketPath(void)
     if (_trackingArea) {
         [self.view removeTrackingArea: _trackingArea];
     }
+    if (_cursorTrackingArea)
+        [self.view removeTrackingArea:_cursorTrackingArea];
 
     _trackingArea = [[NSTrackingArea alloc] initWithRect:self.view.bounds
         options:(NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved |
@@ -751,6 +767,12 @@ ScorpiVMSocketPath(void)
         userInfo:nil];
 
     [self.view addTrackingArea:_trackingArea];
+    // NSTrackingActiveAlways does not support cursorUpdate events.
+    _cursorTrackingArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+        options:(NSTrackingCursorUpdate | NSTrackingActiveInKeyWindow |
+                 NSTrackingInVisibleRect)
+        owner:self userInfo:nil];
+    [self.view addTrackingArea:_cursorTrackingArea];
     
     NSSize pixelSize = [self viewPixelSize];
     _view.drawableSize = CGSizeMake(pixelSize.width, pixelSize.height);
@@ -819,20 +841,17 @@ ScorpiVMSocketPath(void)
 }
 
 - (void)mouseEntered:(NSEvent *)event {
-    if (_hardwareCursor) {
-        [self showCursorIfHidden];
-    } else if (!_cursorHidden && _scanout.enabled) {
-        _cursorHidden = TRUE;
-        [NSCursor hide];
-    }
-    if (_currentCursor)
-        [_currentCursor set];
+    _mouseInside = true;
+    [self updateGuestCursor];
+}
+
+- (void)cursorUpdate:(NSEvent *)event {
+    _mouseInside = true;
+    [self updateGuestCursor];
 }
 
 - (void)mouseExited:(NSEvent *)event {
-    if (_cursorHidden)
-        [NSCursor unhide];
-    _cursorHidden = FALSE;
+    [self restoreHostCursor];
 }
 
 - (BOOL)locationFromEvent:(NSEvent *)event point:(NSPoint *)point {
