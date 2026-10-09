@@ -11,6 +11,8 @@
 #import <fcntl.h>
 #import <sys/mman.h>
 #import <sys/stat.h>
+#include <limits.h>
+#include <math.h>
 #import "hid.h"
 
 #import <Foundation/Foundation.h>
@@ -19,6 +21,9 @@
 #define VM_SOCK_NAME    @"/tmp/vm_sock"
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
 #define VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM 67
+#define SCROLL_UNITS_PER_DETENT 120.0
+// Precise AppKit deltas are points; ordinary wheel deltas are line units.
+#define TRACKPAD_POINTS_PER_DETENT 40.0
 
 static NSString *
 ScorpiVMSocketPath(void)
@@ -47,6 +52,8 @@ ScorpiVMSocketPath(void)
     MTKView *_view;
     Renderer *_renderer;
     int _buttonPressed;
+    double _scrollRemainder;
+    BOOL _lastScrollWasPrecise;
     SocketClient *_sock;
     struct Scanout _scanout;
     bool _displaySurfaceActive;
@@ -90,6 +97,7 @@ ScorpiVMSocketPath(void)
 
 - (void)releasePressedKeys
 {
+    _scrollRemainder = 0;
     for (NSUInteger hid = 1; hid < sizeof(_pressedKeys) / sizeof(_pressedKeys[0]); hid++) {
         if (_pressedKeys[hid]) {
             [_sock sendKeyEventWithDown:0 hidcode:(uint8_t)hid mods:0];
@@ -946,14 +954,29 @@ ScorpiVMSocketPath(void)
 }
 
 - (void)scrollWheel:(NSEvent *)event {
-    //NSLog(@"Scrolled: deltaX = %f, deltaY = %f", event.scrollingDeltaX, event.scrollingDeltaY);
     NSPoint location;
     if (![self locationFromEvent:event point:&location])
         return;
-    if (event.scrollingDeltaY > 5)
-        [_sock sendMouseEventWithButton:_buttonPressed | 8 x:(int)location.x y:(int)location.y];
-    else if (event.scrollingDeltaY < -5)
-        [_sock sendMouseEventWithButton: _buttonPressed | 16 x:(int)location.x y:(int)location.y];
+
+    BOOL precise = event.hasPreciseScrollingDeltas;
+    if (precise != _lastScrollWasPrecise || (event.phase & NSEventPhaseBegan))
+        _scrollRemainder = 0;
+    _lastScrollWasPrecise = precise;
+
+    double delta = event.scrollingDeltaY * SCROLL_UNITS_PER_DETENT;
+    if (precise)
+        delta /= TRACKPAD_POINTS_PER_DETENT;
+    if (!isfinite(delta))
+        return;
+
+    // Keep fractional counts and accept momentum events without a threshold.
+    double total = delta + _scrollRemainder;
+    int counts = (int)fmax(-INT_MAX, fmin(INT_MAX, trunc(total)));
+    _scrollRemainder = total - trunc(total);
+    if (counts)
+        [_sock sendScrollEventWithButton:_buttonPressed
+                                      x:(int)location.x y:(int)location.y
+                                  delta:counts];
 }
 
 

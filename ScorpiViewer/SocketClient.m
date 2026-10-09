@@ -234,6 +234,24 @@ static const struct lws_protocols protocols[] = {
     [self sendSyncRequest:request expectResponse: FALSE];
 }
 
+- (void)sendScrollEventWithButton:(int)button x:(int)x y:(int)y delta:(int)delta {
+    if (!_connected || delta == 0)
+        return;
+
+    NSDictionary *request = @{
+        @"type": @"request",
+        @"id": @([self generateRequestId]),
+        @"action": @"scroll_event",
+        @"args": @[
+            [NSString stringWithFormat:@"%d", button],
+            [NSString stringWithFormat:@"%d", x],
+            [NSString stringWithFormat:@"%d", y],
+            [NSString stringWithFormat:@"%d", delta],
+        ],
+    };
+    [self sendSyncRequest:request expectResponse:FALSE];
+}
+
 - (void)sendKeyEventWithDown:(int)down hidcode:(uint8_t)hidcode mods:(uint8_t)mods {
     if (!_connected)
         return;
