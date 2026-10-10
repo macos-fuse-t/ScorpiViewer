@@ -11,3 +11,17 @@ do not enable high-resolution scrolling receive accumulated whole wheel steps.
 
 Trackpad sensitivity is set by `TRACKPAD_POINTS_PER_DETENT` in `ViewController.m`
 (40 points per wheel detent). Horizontal scrolling is not forwarded.
+
+Viewer accepts the HV socket as its first positional argument. For text clipboard
+sharing with Windows, launch it with `--daemon-socket <scorpid socket> --vm-id <VM ID>`
+(or set `SCORPI_DAEMON_SOCKET` and `SCORPI_VM_ID`). `scorpi view` and
+`scorpi start --view` pass those arguments automatically. View → Share Clipboard is
+on by default and synchronizes while this Viewer is focused, including its menus.
+Focus loss attempts a final Windows-to-Mac copy before pausing. Closing the window
+or disabling sharing stops immediately. Clipboard contents stay in scorpid and
+the guest agent; Viewer sends only state over `scorpi.viewer.v1` on the daemon's
+Unix socket. Daemon disconnects do not interrupt the HV display/input connection;
+Viewer reconnects and sends a fresh state snapshot.
+
+The native daemon-session client has a standalone protocol check:
+`python3 tests/viewer_session_protocol_test.py`.

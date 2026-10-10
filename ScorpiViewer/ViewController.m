@@ -17,6 +17,7 @@
 
 #import <Foundation/Foundation.h>
 #import "SocketClient.h"
+#import "ViewerSessionClient.h"
 
 #define VM_SOCK_NAME    @"/tmp/vm_sock"
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
@@ -37,6 +38,7 @@ ScorpiVMSocketPath(void)
     for (NSUInteger i = 1; i < arguments.count; i++) {
         NSString *arg = arguments[i];
 
+        if ([arg isEqualToString:@"--daemon-socket"] || [arg isEqualToString:@"--vm-id"]) { i++; continue; }
         if (arg.length == 0 || [arg hasPrefix:@"-"])
             continue;
 
@@ -45,6 +47,14 @@ ScorpiVMSocketPath(void)
     }
 
     return VM_SOCK_NAME;
+}
+
+static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
+ NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
+ for (NSUInteger i = 1; i + 1 < arguments.count; i++) {
+  if ([arguments[i] isEqualToString:flag]) return arguments[i+1];
+ }
+ return NSProcessInfo.processInfo.environment[environmentName];
 }
 
 @implementation ViewController
@@ -74,6 +84,54 @@ ScorpiVMSocketPath(void)
     bool _resizeRequestsEnabled;
     bool _pressedKeys[256];
     uint8_t _hidModifiers;
+    BOOL _clipboardEnabled;
+    BOOL _viewerClosed;
+    BOOL _clipboardObserversInstalled;
+    NSUInteger _menuTracking;
+    ViewerSessionClient *_viewerSession;
+}
+
+- (void)updateViewerState:(NSNotification *)notification {
+    if ([notification.name isEqualToString:NSWindowWillCloseNotification]) {
+        _viewerClosed = YES;
+        [_viewerSession stop];
+        return;
+    }
+    NSWindow *window = self.view.window;
+    BOOL focused = !_viewerClosed && NSApp.isActive && !window.isMiniaturized &&
+                   (window.isKeyWindow || (_menuTracking > 0 && window.isMainWindow));
+    [_viewerSession setFocused:focused clipboardEnabled:_clipboardEnabled];
+}
+
+- (void)viewerFocusChanged:(NSNotification *)notification {
+    // Evaluate after AppKit finishes updating key/main window state. Menus
+    // belong to the focused Viewer and must not interrupt context-menu paste.
+    dispatch_async(dispatch_get_main_queue(), ^{ [self updateViewerState:nil]; });
+}
+
+- (void)viewerMenuTracking:(NSNotification *)notification {
+    if ([notification.name isEqualToString:NSMenuDidBeginTrackingNotification]) _menuTracking++;
+    else if (_menuTracking > 0) _menuTracking--;
+    [self viewerFocusChanged:notification];
+}
+
+- (IBAction)toggleShareClipboard:(id)sender {
+    _clipboardEnabled = !_clipboardEnabled;
+    [self updateViewerState:nil];
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(toggleShareClipboard:)) {
+        item.state = _clipboardEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    return YES;
+}
+
+- (IBAction)paste:(id)sender {
+    // The daemon owns clipboard synchronization; send only the guest shortcut.
+    [_sock sendKeyEventWithDown:1 hidcode:0x19 mods:0x01];
+    [_sock sendKeyEventWithDown:0 hidcode:0x19 mods:0x00];
+    _hidModifiers = 0;
 }
 
 - (BOOL)acceptsFirstResponder
@@ -226,6 +284,7 @@ ScorpiVMSocketPath(void)
 }
 
 - (void) onDisconnected {
+    [_viewerSession stop];
     [self restoreHostCursor];
     [self releaseScanout];
     _displaySurfaceActive = false;
@@ -660,6 +719,14 @@ ScorpiVMSocketPath(void)
         return;
     }
     _sock.delegate = self;
+    _clipboardEnabled = YES;
+    NSString *daemonSocket = ScorpiViewerOption(@"--daemon-socket", @"SCORPI_DAEMON_SOCKET");
+    NSString *vmID = ScorpiViewerOption(@"--vm-id", @"SCORPI_VM_ID");
+    if (daemonSocket.length > 0 && vmID.length > 0) {
+        _viewerSession = [[ViewerSessionClient alloc] initWithSocket:daemonSocket vmID:vmID];
+        [self updateViewerState:nil];
+        [_viewerSession start];
+    }
 
     if ([self.view isKindOfClass:[MTKView class]]) {
         _view = (MTKView *)self.view;
@@ -726,10 +793,21 @@ ScorpiVMSocketPath(void)
                                                object:_view.window];
     [self activateInputResponder];
     [self refreshCursorLocation];
+    if (!_clipboardObserversInstalled) {
+        _clipboardObserversInstalled = YES;
+        NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+        [center addObserver:self selector:@selector(updateViewerState:) name:NSWindowWillCloseNotification object:window];
+        [center addObserver:self selector:@selector(viewerFocusChanged:) name:NSApplicationDidBecomeActiveNotification object:NSApp];
+        [center addObserver:self selector:@selector(viewerFocusChanged:) name:NSApplicationDidResignActiveNotification object:NSApp];
+        [center addObserver:self selector:@selector(viewerMenuTracking:) name:NSMenuDidBeginTrackingNotification object:nil];
+        [center addObserver:self selector:@selector(viewerMenuTracking:) name:NSMenuDidEndTrackingNotification object:nil];
+    }
+    [self updateViewerState:nil];
 }
 
 - (void)dealloc
 {
+    [_viewerSession stop];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
@@ -738,6 +816,7 @@ ScorpiVMSocketPath(void)
     if (notification.object == self.view.window) {
         [self activateInputResponder];
         [self refreshCursorLocation];
+        [self viewerFocusChanged:notification];
     }
 }
 
@@ -746,6 +825,7 @@ ScorpiVMSocketPath(void)
     if (notification.object == self.view.window) {
         [self releasePressedKeys];
         [self restoreHostCursor];
+        [self viewerFocusChanged:notification];
     }
 }
 
@@ -841,10 +921,16 @@ ScorpiVMSocketPath(void)
     // ignore repeats after focus returns until a fresh physical key-down.
     if (event.isARepeat)
         return;
+    if (event.keyCode == 9 && (event.modifierFlags & NSEventModifierFlagCommand)) {
+        [self paste:self];
+        return;
+    }
     [self send_event: event down: true];
 }
 
 - (void) keyUp:(NSEvent *)event {
+    if (event.keyCode == 9 && (event.modifierFlags & NSEventModifierFlagCommand))
+        return;
     [self send_event: event down: false];
 }
 
