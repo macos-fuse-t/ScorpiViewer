@@ -25,6 +25,7 @@
 #define SCROLL_UNITS_PER_DETENT 120.0
 // Precise AppKit deltas are points; ordinary wheel deltas are line units.
 #define TRACKPAD_POINTS_PER_DETENT 40.0
+static NSString * const ScorpiUseMacShortcuts = @"UseMacShortcuts";
 
 static NSString *
 ScorpiVMSocketPath(void)
@@ -83,7 +84,12 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     bool _programmaticResize;
     bool _resizeRequestsEnabled;
     bool _pressedKeys[256];
+    bool _macShortcutKeys[256];
     uint8_t _hidModifiers;
+    uint8_t _hostHidModifiers;
+    BOOL _commandPending;
+    BOOL _commandUsed;
+    id _keyboardMonitor;
     BOOL _clipboardEnabled;
     BOOL _viewerClosed;
     BOOL _clipboardObserversInstalled;
@@ -120,9 +126,25 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     [self updateViewerState:nil];
 }
 
+- (BOOL)useMacShortcuts {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        [NSUserDefaults.standardUserDefaults registerDefaults:@{ScorpiUseMacShortcuts: @YES}];
+    });
+    return [NSUserDefaults.standardUserDefaults boolForKey:ScorpiUseMacShortcuts];
+}
+
+- (IBAction)toggleUseMacShortcuts:(id)sender {
+    [self releasePressedKeys];
+    [NSUserDefaults.standardUserDefaults setBool:![self useMacShortcuts]
+                                        forKey:ScorpiUseMacShortcuts];
+}
+
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     if (item.action == @selector(toggleShareClipboard:)) {
         item.state = _clipboardEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    } else if (item.action == @selector(toggleUseMacShortcuts:)) {
+        item.state = [self useMacShortcuts] ? NSControlStateValueOn : NSControlStateValueOff;
     }
     return YES;
 }
@@ -130,8 +152,49 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 - (IBAction)paste:(id)sender {
     // The daemon owns clipboard synchronization; send only the guest shortcut.
     [_sock sendKeyEventWithDown:1 hidcode:0x19 mods:0x01];
-    [_sock sendKeyEventWithDown:0 hidcode:0x19 mods:0x00];
-    _hidModifiers = 0;
+    [_sock sendKeyEventWithDown:0 hidcode:0x19 mods:_hidModifiers];
+}
+
+- (BOOL)isMacShortcut:(NSEvent *)event {
+    NSEventModifierFlags flags = event.modifierFlags &
+        (NSEventModifierFlagCommand | NSEventModifierFlagControl |
+         NSEventModifierFlagOption | NSEventModifierFlagShift);
+    if (flags != NSEventModifierFlagCommand)
+        return NO;
+    NSString *key = event.charactersIgnoringModifiers.lowercaseString;
+    return key.length == 1 && [@"cxvazfw" containsString:key];
+}
+
+- (void)installKeyboardMonitor {
+    if (_keyboardMonitor)
+        return;
+    __weak ViewController *weakSelf = self;
+    _keyboardMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp)
+        handler:^NSEvent *(NSEvent *event) {
+            ViewController *controller = weakSelf;
+            if (!controller || event.window != controller.view.window ||
+                event.window.firstResponder != controller)
+                return event;
+            if (event.type == NSEventTypeKeyUp) {
+                // AppKit can consume Command-key releases on its menu path.
+                // Release the held HID key even if Command was released first.
+                if (event.keyCode < sizeof(macToHidKeyMap) / sizeof(macToHidKeyMap[0]) &&
+                    controller->_pressedKeys[macToHidKeyMap[event.keyCode]]) {
+                    [controller keyUp:event];
+                    return nil;
+                }
+                return event;
+            }
+            if (event.modifierFlags & NSEventModifierFlagCommand)
+                controller->_commandUsed = YES;
+            // Route these keys before AppKit's menu equivalents. With the
+            // option off they retain their ordinary Windows-key modifiers.
+            if ([controller isMacShortcut:event]) {
+                [controller keyDown:event];
+                return nil;
+            }
+            return event;
+        }];
 }
 
 - (BOOL)acceptsFirstResponder
@@ -161,10 +224,14 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
             [_sock sendKeyEventWithDown:0 hidcode:(uint8_t)hid mods:0];
             _pressedKeys[hid] = false;
         }
+        _macShortcutKeys[hid] = false;
     }
     if (_hidModifiers)
         [_sock sendKeyEventWithDown:0 hidcode:0 mods:0];
     _hidModifiers = 0;
+    _hostHidModifiers = 0;
+    _commandPending = NO;
+    _commandUsed = NO;
 }
 
 - (void)activateInputResponder
@@ -792,6 +859,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
                                                  name:NSWindowDidChangeBackingPropertiesNotification
                                                object:_view.window];
     [self activateInputResponder];
+    [self installKeyboardMonitor];
     [self refreshCursorLocation];
     if (!_clipboardObserversInstalled) {
         _clipboardObserversInstalled = YES;
@@ -807,6 +875,8 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void)dealloc
 {
+    if (_keyboardMonitor)
+        [NSEvent removeMonitor:_keyboardMonitor];
     [_viewerSession stop];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
@@ -896,8 +966,43 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 - (void)flagsChanged:(NSEvent *)event {
     // AppKit sends modifier-only presses/releases here, not through keyUp.
     // HID usage zero updates the modifier byte without changing held keys.
-    _hidModifiers = [self hidModifiersForEvent:event];
+    uint8_t hostModifiers = [self hidModifiersForEvent:event];
+    BOOL commandPressed = (hostModifiers & 0x08) && !(_hostHidModifiers & 0x08);
+    BOOL commandReleased = !(hostModifiers & 0x08) && (_hostHidModifiers & 0x08);
+    if (commandPressed) {
+        _commandPending = [self useMacShortcuts];
+        _commandUsed = NO;
+    }
+    if (hostModifiers & 0x07)
+        _commandUsed = YES;
+    if (commandReleased && _commandPending && !_commandUsed) {
+        // A Command tap still opens Start. Defer it until release so a
+        // translated shortcut never briefly presses the Windows key.
+        [_sock sendKeyEventWithDown:0 hidcode:0 mods:(_hidModifiers | 0x08)];
+    }
+    if (commandReleased)
+        _commandPending = NO;
+    _hostHidModifiers = hostModifiers;
+    _hidModifiers = [self guestModifiers];
     [_sock sendKeyEventWithDown:0 hidcode:0 mods:_hidModifiers];
+}
+
+- (uint8_t)guestModifiers {
+    if (![self useMacShortcuts] || !(_hostHidModifiers & 0x08))
+        return _hostHidModifiers;
+    BOOL shortcutHeld = NO;
+    BOOL otherKeyHeld = NO;
+    for (NSUInteger hid = 1; hid < sizeof(_pressedKeys); hid++) {
+        if (_pressedKeys[hid]) {
+            if (_macShortcutKeys[hid]) shortcutHeld = YES;
+            else otherKeyHeld = YES;
+        }
+    }
+    if (shortcutHeld)
+        return (_hostHidModifiers & ~0x08) | 0x01;
+    if (otherKeyHeld)
+        return _hostHidModifiers;
+    return _hostHidModifiers & ~0x08;
 }
 
 - (void) send_event: (NSEvent *)event down: (bool) down {
@@ -909,10 +1014,14 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
         NSLog(@"Unmapped key: %d", macKeyCode);
         return;
     }
-    if (down && _pressedKeys[hidKeyCode])
+    if (_pressedKeys[hidKeyCode] == down)
         return;
+    if (event.modifierFlags & NSEventModifierFlagCommand)
+        _commandUsed = YES;
     _pressedKeys[hidKeyCode] = down;
-    _hidModifiers = [self hidModifiersForEvent:event];
+    _macShortcutKeys[hidKeyCode] = down && [self useMacShortcuts] && [self isMacShortcut:event];
+    _hostHidModifiers = [self hidModifiersForEvent:event];
+    _hidModifiers = [self guestModifiers];
     [_sock sendKeyEventWithDown:down hidcode:hidKeyCode mods:_hidModifiers];
 }
 
@@ -921,16 +1030,10 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     // ignore repeats after focus returns until a fresh physical key-down.
     if (event.isARepeat)
         return;
-    if (event.keyCode == 9 && (event.modifierFlags & NSEventModifierFlagCommand)) {
-        [self paste:self];
-        return;
-    }
     [self send_event: event down: true];
 }
 
 - (void) keyUp:(NSEvent *)event {
-    if (event.keyCode == 9 && (event.modifierFlags & NSEventModifierFlagCommand))
-        return;
     [self send_event: event down: false];
 }
 

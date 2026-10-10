@@ -610,6 +610,12 @@
                                                 <action selector="toggleShareClipboard:" target="Ady-hI-5gd" id="scp-clip-action"/>
                                             </connections>
                                         </menuItem>
+                                        <menuItem title="Use Mac shortcuts" state="on" id="scp-keys-item">
+                                            <modifierMask key="keyEquivalentModifierMask"/>
+                                            <connections>
+                                                <action selector="toggleUseMacShortcuts:" target="Ady-hI-5gd" id="scp-keys-action"/>
+                                            </connections>
+                                        </menuItem>
                                         <menuItem isSeparatorItem="YES" id="scp-clip-separator"/>
                                         <menuItem title="Show Toolbar" keyEquivalent="t" id="snW-S8-Cw5">
                                             <modifierMask key="keyEquivalentModifierMask" option="YES" command="YES"/>

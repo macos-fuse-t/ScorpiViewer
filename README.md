@@ -25,3 +25,11 @@ Viewer reconnects and sends a fresh state snapshot.
 
 The native daemon-session client has a standalone protocol check:
 `python3 tests/viewer_session_protocol_test.py`.
+
+View → Use Mac shortcuts is on by default and remembers your choice. It sends
+Cmd+C/X/V/A/Z/F/W to the guest as Ctrl+C/X/V/A/Z/F/W. These shortcuts reach the
+guest before macOS menus handle them, including Cmd+W for closing a guest tab or
+document. With the option off, they use the Windows key instead. Other Command
+combinations retain their existing behavior, and tapping Command opens the guest
+Start menu. Cmd+Q, Cmd+Tab, and Ctrl+Cmd+F retain their macOS actions. Clipboard
+sharing is controlled separately by Share Clipboard.

@@ -17,6 +17,6 @@
 
 
 // Our macOS view controller.
-@interface ViewController : NSViewController<NotificationDelegate>
+@interface ViewController : NSViewController<NotificationDelegate, NSMenuItemValidation>
 
 @end
