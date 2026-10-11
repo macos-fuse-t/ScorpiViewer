@@ -26,6 +26,13 @@ Viewer reconnects and sends a fresh state snapshot.
 The native daemon-session client has a standalone protocol check:
 `python3 tests/viewer_session_protocol_test.py`.
 
+Viewer redraws completed IOSurface frames and notification-driven scanouts on
+demand. Pending updates coalesce into the next AppKit redraw; idle frames do not
+submit GPU work. Resize/exposure still redraw the current image, and legacy
+`redrawOnTimer` scanouts retain the 60 Hz fallback. Surface IDs identify storage,
+not frame contents: repeated IDs still invalidate the view. The native rendering
+check is `tests/run-renderer-test.sh`.
+
 View → Use Mac shortcuts is on by default and remembers your choice. It sends
 Cmd+C/X/V/A/Z/F/W to the guest as Ctrl+C/X/V/A/Z/F/W. These shortcuts reach the
 guest before macOS menus handle them, including Cmd+W for closing a guest tab or

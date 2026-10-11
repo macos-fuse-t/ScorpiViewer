@@ -91,6 +91,7 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
     
     struct Scanout _scanout;
     BOOL _shouldRender;
+    BOOL _scanoutNeedsUpload;
     
     dispatch_semaphore_t _renderSemaphore;  // Semaphore for synchronization
 }
@@ -103,17 +104,39 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
         _view = view;
         
         view.preferredFramesPerSecond = 60;
-        view.enableSetNeedsDisplay = NO;
+        view.paused = YES;
+        view.enableSetNeedsDisplay = YES;
         view.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-        view.delegate = self;
         
         _shouldRender = NO;
         _renderSemaphore = dispatch_semaphore_create(1); // Allow 1 thread at a time
+        view.delegate = self;
         
         [self setupPipeline];
         [self setupVertices];
     }
     return self;
+}
+
+- (void)requestDraw {
+    // Socket notifications normally arrive on the main queue. Keep AppKit
+    // mutations there if another caller updates the renderer in the future.
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self requestDraw]; });
+        return;
+    }
+
+    dispatch_semaphore_wait(_renderSemaphore, DISPATCH_TIME_FOREVER);
+    BOOL timer = _shouldRender && !_displaySurface && _scanout.redrawOnTimer;
+    dispatch_semaphore_signal(_renderSemaphore);
+
+    // Only legacy scanouts without update notifications need continuous
+    // drawing. AppKit coalesces frame invalidations until its next redraw.
+    if (_view.enableSetNeedsDisplay != !timer)
+        _view.enableSetNeedsDisplay = !timer;
+    if (_view.paused != !timer)
+        _view.paused = !timer;
+    [_view setNeedsDisplay:YES];
 }
 
 - (void)setupPipeline {
@@ -150,12 +173,16 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
 - (void)stop {
     dispatch_semaphore_wait(_renderSemaphore, DISPATCH_TIME_FOREVER);
     _shouldRender = NO;
+    _scanoutNeedsUpload = NO;
+    _texture = nil;
+    _nextTexture = nil;
     if (_displaySurface) {
         CFRelease(_displaySurface);
         _displaySurface = nil;
     }
     bzero(&_scanout, sizeof(_scanout));
     dispatch_semaphore_signal(_renderSemaphore);
+    [self requestDraw];
 }
 
 - (void)updateScanout:(struct Scanout)scanout {
@@ -169,9 +196,10 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
         _displaySurface = nil;
     }
     [self _updateTexture];
-    
-    _shouldRender = YES;
+    _scanoutNeedsUpload = NO;
+    _shouldRender = _texture != nil;
     dispatch_semaphore_signal(_renderSemaphore);
+    [self requestDraw];
 }
 
 - (void)updateDisplaySurfaceWithID:(uint64_t)surfaceID
@@ -228,6 +256,7 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
         CFRelease(_displaySurface);
     _displaySurface = surface;
     _texture = texture;
+    _scanoutNeedsUpload = NO;
     bzero(&_scanout, sizeof(_scanout));
     _scanout.enabled = true;
     _scanout.width = width;
@@ -235,6 +264,9 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
     _scanout.pixelFormat = format;
     _shouldRender = YES;
     dispatch_semaphore_signal(_renderSemaphore);
+    // A repeated surface ID is still a new completed frame, not an unchanged
+    // image. Invalidate on every successful notification without scanning pixels.
+    [self requestDraw];
 }
 
 - (void)clearDisplaySurface {
@@ -245,6 +277,7 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
     }
     CFRelease(_displaySurface);
     _displaySurface = nil;
+    _scanoutNeedsUpload = NO;
     if (_scanout.enabled && _scanout.base_ptr) {
         [self _updateTexture];
         _shouldRender = _texture != nil;
@@ -253,6 +286,7 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
         _shouldRender = NO;
     }
     dispatch_semaphore_signal(_renderSemaphore);
+    [self requestDraw];
 }
 
 - (void) _updateTexture {
@@ -316,10 +350,13 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
 }
 
 - (void) updateTexture {
-    //NSLog(@"updateTexture");
     dispatch_semaphore_wait(_renderSemaphore, DISPATCH_TIME_FOREVER);
-    [self _updateTexture];
+    // The HV also emits update_scanout after publishing an IOSurface. That
+    // compatibility notification must not schedule a second presentation.
+    BOOL update = !_displaySurface && _scanout.enabled && _scanout.base_ptr;
+    if (update) _scanoutNeedsUpload = YES;
     dispatch_semaphore_signal(_renderSemaphore);
+    if (update) [self requestDraw];
 }
 
 - (void)drawInMTKView:(MTKView *)view {
@@ -331,14 +368,16 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
         return;
     }
     passDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+
+    if (_shouldRender && (_scanoutNeedsUpload || _scanout.redrawOnTimer)) {
+        [self _updateTexture];
+        _scanoutNeedsUpload = NO;
+    }
     
     id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
     id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:passDescriptor];
 
     if (_shouldRender && _texture) {
-        if (_scanout.redrawOnTimer)
-            [self _updateTexture];
-
         [encoder setRenderPipelineState:_pipelineState];
         [encoder setVertexBuffer:_vertexBuffer offset:0 atIndex:BufferIndexMeshPositions];
         [encoder setFragmentTexture:_texture atIndex:TextureIndexColor];
@@ -353,7 +392,7 @@ ScorpiScanoutTextureShape(struct Scanout scanout,
 }
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
-    // Handle resize if needed
+    [self requestDraw];
 }
 
 @end
