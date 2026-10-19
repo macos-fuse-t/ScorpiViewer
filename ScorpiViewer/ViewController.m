@@ -83,6 +83,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     bool _hdpi;
     bool _programmaticResize;
     bool _resizeRequestsEnabled;
+    BOOL _fullScreenTransition;
     bool _pressedKeys[256];
     bool _macShortcutKeys[256];
     uint8_t _hidModifiers;
@@ -361,9 +362,29 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     [NSApp terminate:self];
 }
 
+- (BOOL)preservesFullScreenFrame {
+    return _fullScreenTransition ||
+        (self.view.window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+}
+
+- (void)windowFullScreenChanged:(NSNotification *)notification {
+    if (notification.object != self.view.window)
+        return;
+
+    _fullScreenTransition =
+        [notification.name isEqualToString:NSWindowWillEnterFullScreenNotification] ||
+        [notification.name isEqualToString:NSWindowWillExitFullScreenNotification];
+}
+
 - (void)resizeWindowToWidth:(int)width height:(int)height {
     NSWindow *window = self.view.window;
     if (window) {
+        // AppKit owns the frame throughout native fullscreen and its animations.
+        // The renderer stretches each guest texture across the existing view.
+        if ([self preservesFullScreenFrame]) {
+            _resizeRequestsEnabled = true;
+            return;
+        }
         [self updateBackingScale];
         CGFloat widthInPoints = width / _scaling;
         CGFloat heightInPoints = height / _scaling;
@@ -858,6 +879,15 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
                                              selector:@selector(windowDidChangeBackingProperties:)
                                                  name:NSWindowDidChangeBackingPropertiesNotification
                                                object:_view.window];
+    for (NSNotificationName name in @[NSWindowWillEnterFullScreenNotification,
+                                      NSWindowDidEnterFullScreenNotification,
+                                      NSWindowWillExitFullScreenNotification,
+                                      NSWindowDidExitFullScreenNotification]) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self name:name object:window];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(windowFullScreenChanged:)
+                                                     name:name object:window];
+    }
     [self activateInputResponder];
     [self installKeyboardMonitor];
     [self refreshCursorLocation];
@@ -937,6 +967,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     int width = (int)pixelSize.width;
     int height = (int)pixelSize.height;
     if (_resizeRequestsEnabled && !_programmaticResize &&
+        ![self preservesFullScreenFrame] &&
         _scanout.enabled && !_scanout.redrawOnTimer &&
         (_scanout.width != width || _scanout.height != height)) {
         [_sock requestResize:width y:height];
