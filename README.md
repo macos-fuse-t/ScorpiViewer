@@ -33,6 +33,11 @@ submit GPU work. Resize/exposure still redraw the current image, and legacy
 not frame contents: repeated IDs still invalidate the view. The native rendering
 check is `tests/run-renderer-test.sh`.
 
+In fullscreen, guest resolution changes stretch the display to the existing
+window. Fullscreen transitions also preserve the window frame, and fullscreen
+layout does not request a different guest resolution. Windowed mode continues
+to size the window to the guest display. Check with `tests/run-fullscreen-test.sh`.
+
 View → Use Mac shortcuts is on by default and remembers your choice. It sends
 Cmd+C/X/V/A/Z/F/W to the guest as Ctrl+C/X/V/A/Z/F/W. These shortcuts reach the
 guest before macOS menus handle them, including Cmd+W for closing a guest tab or
