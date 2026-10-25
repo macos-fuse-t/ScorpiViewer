@@ -54,8 +54,8 @@ buttons and keys. Window moves and resizes update the confinement boundary.
 With a matching hypervisor, captured input uses relative mouse reports, allowing
 continuous camera turns past every screen edge. The physical Mac pointer stays
 hidden at the center; guest cursor shape, visibility and `move_cursor` position
-updates control a separate host-rendered overlay. Until the guest supplies cursor
-positions, visible cursor placement is estimated from movement. Ordinary
+updates control a separate host-rendered overlay. Relative deltas never predict
+the cursor position: Windows remains authoritative for acceleration, clipping and warps. Ordinary
 uncaptured input continues to use absolute tablet coordinates. Older hypervisors
 retain the previous absolute confinement behavior.
 

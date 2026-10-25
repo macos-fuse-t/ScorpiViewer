@@ -67,6 +67,20 @@ static NSMutableArray<NSArray *> *relativeEvents;
 - (BOOL)hasViewerInputFocus { return self.testFocus; }
 @end
 
+@interface TestGuestCursorOverlay : GuestCursorOverlay
+@property NSUInteger mutations;
+@end
+@implementation TestGuestCursorOverlay
+- (void)setHidden:(BOOL)hidden {
+    self.mutations++;
+    [super setHidden:hidden];
+}
+- (void)setNeedsDisplay:(BOOL)needsDisplay {
+    self.mutations++;
+    [super setNeedsDisplay:needsDisplay];
+}
+@end
+
 @interface MotionEvent : NSEvent
 @property NSWindow *testWindow;
 @property CGFloat dx;
@@ -314,6 +328,9 @@ int main(void) {
         assert(!lock.isLocked && lock.associated);
 
         // Updated hypervisors select relative input, with exclusive routing.
+        TestGuestCursorOverlay *testOverlay = [[TestGuestCursorOverlay alloc] initWithFrame:controller.view.bounds];
+        [controller.view addSubview:testOverlay];
+        [controller setValue:testOverlay forKey:@"guestCursorOverlay"];
         relativeEvents = [NSMutableArray array];
         [controller setValue:@YES forKey:@"relativeMouseSupported"];
         [controller setValue:@YES forKey:@"displaySurfaceActive"];
@@ -349,8 +366,24 @@ int main(void) {
         NSPoint anchor = lock.warpedPoint;
         [controller moveCursor:@{@"x": @900, @"y": @700}];
         assert(NSEqualPoints(lock.warpedPoint, anchor)); // Guest cursor feedback never warps the host.
+        // Sending relative input must not predict an accelerated/clipped
+        // guest position. It changes only when Windows reports a new one.
+        motion.dx = 40; motion.dy = -25;
+        [lock handleEvent:motion];
+        assert(NSEqualPoints([[controller valueForKey:@"guestCursorPosition"] pointValue],
+                             NSMakePoint(900, 700)));
+        [controller moveCursor:@{@"x": @-2, @"y": @7}];
+        assert(NSEqualPoints([[controller valueForKey:@"guestCursorPosition"] pointValue],
+                             NSMakePoint(-2, 7)));
         GuestCursorOverlay *overlay = [controller valueForKey:@"guestCursorOverlay"];
         assert(overlay && !overlay.isHidden && [overlay hitTest:NSZeroPoint] == nil);
+        // AppKit invokes cursorUpdate during its display cycle. It must
+        // select the host cursor without invalidating the guest overlay.
+        testOverlay.mutations = 0;
+        for (unsigned i = 0; i < 100; ++i) [controller cursorUpdate:click];
+        assert(!overlay.isHidden && testOverlay.mutations == 0);
+        [controller updateGuestCursor];
+        assert(testOverlay.mutations == 0); // Unchanged state does not redraw.
         [controller hideCursor];
         assert(overlay.isHidden);
         [controller mouseDown:click];

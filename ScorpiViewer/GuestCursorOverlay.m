@@ -11,6 +11,9 @@
 
 - (void)showCursor:(NSCursor *)cursor atGuestPoint:(NSPoint)point
         guestSize:(NSSize)size cursorScale:(CGFloat)scale {
+    if (!self.isHidden && _cursor == cursor && NSEqualPoints(_guestPoint, point) &&
+        NSEqualSizes(_guestSize, size) && _cursorScale == scale)
+        return;
     _cursor = cursor;
     _guestPoint = point;
     _guestSize = size;

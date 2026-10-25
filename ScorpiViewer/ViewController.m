@@ -79,6 +79,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     NSCursor *_emptyCursor;
     bool _cursorHidden;
     bool _hardwareCursor;
+    BOOL _hasGuestCursorPosition;
     bool _mouseInside;
     NSTrackingArea *_trackingArea;
     NSTrackingArea *_cursorTrackingArea;
@@ -167,12 +168,8 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     _relativeRemainder.y -= y;
     if (!x && !y) return;
     [_sock sendRelativeMouseWithButton:_buttonPressed dx:x dy:y scroll:0];
-    // Until authoritative move_cursor notifications arrive, estimate a visible
-    // cursor locally. Future driver position updates replace this estimate.
-    NSSize size = [self guestDisplaySize];
-    _guestCursorPosition.x = MAX(0, MIN(_guestCursorPosition.x + x, size.width - 1));
-    _guestCursorPosition.y = MAX(0, MIN(_guestCursorPosition.y + y, size.height - 1));
-    [self updateGuestCursor];
+    // Raw deltas are input, not cursor coordinates. Windows applies its own
+    // acceleration, clipping and warps; only move_cursor updates the overlay.
 }
 
 - (void)installMouseLock {
@@ -191,7 +188,8 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
         if (locked) {
             controller->_relativeMouseActive = controller->_relativeMouseSupported;
             controller->_relativeRemainder = NSZeroPoint;
-            controller->_guestCursorPosition = controller->_lastGuestMousePoint;
+            if (!controller->_hasGuestCursorPosition)
+                controller->_guestCursorPosition = controller->_lastGuestMousePoint;
             [controller activateInputResponder];
         } else {
             [controller releaseMouseButtons];
@@ -635,18 +633,26 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void)updateGuestCursor
 {
-    _guestCursorOverlay.hidden = YES;
+    BOOL showOverlay = _relativeMouseActive && _mouseLock.isLocked &&
+        _hardwareCursor && _cursorEnabled && _currentCursor && [self hasViewerInputFocus];
+    if (showOverlay) {
+        if (!_guestCursorOverlay) {
+            _guestCursorOverlay = [[GuestCursorOverlay alloc] initWithFrame:self.view.bounds];
+            _guestCursorOverlay.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            [self.view addSubview:_guestCursorOverlay];
+        }
+        [_guestCursorOverlay showCursor:_currentCursor atGuestPoint:_guestCursorPosition
+                             guestSize:[self guestDisplaySize] cursorScale:[self currentBackingScale]];
+    } else if (_guestCursorOverlay && !_guestCursorOverlay.isHidden) {
+        _guestCursorOverlay.hidden = YES;
+    }
+    [self updateHostCursor];
+}
+
+- (void)updateHostCursor
+{
     if (_relativeMouseActive && _mouseLock.isLocked) {
         if (!_cursorHidden) { [NSCursor hide]; _cursorHidden = true; }
-        if (_hardwareCursor && _cursorEnabled && _currentCursor && [self hasViewerInputFocus]) {
-            if (!_guestCursorOverlay) {
-                _guestCursorOverlay = [[GuestCursorOverlay alloc] initWithFrame:self.view.bounds];
-                _guestCursorOverlay.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-                [self.view addSubview:_guestCursorOverlay];
-            }
-            [_guestCursorOverlay showCursor:_currentCursor atGuestPoint:_guestCursorPosition
-                                 guestSize:[self guestDisplaySize] cursorScale:[self currentBackingScale]];
-        }
         return;
     }
     if (_mouseLock.enabled && !_mouseLock.isLocked) {
@@ -754,6 +760,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 - (void) moveCursor: (NSDictionary *)data
 {
     _guestCursorPosition = NSMakePoint([data[@"x"] doubleValue], [data[@"y"] doubleValue]);
+    _hasGuestCursorPosition = YES;
     if (_relativeMouseActive) [self updateGuestCursor];
 }
 
@@ -771,6 +778,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void) initDisplay: (NSDictionary *)data
 {
+    _hasGuestCursorPosition = NO;
     _relativeMouseSupported = [data[@"relative_mouse"] boolValue];
     _hdpi = data[@"hdpi"] ? [ data[@"hdpi"] boolValue] : false;
 
@@ -791,6 +799,8 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
     NSDictionary *mouse_scanout = data[@"mouse_scanout"];
     if (mouse_scanout) {
+        if (mouse_scanout[@"x"] && mouse_scanout[@"y"])
+            [self moveCursor:mouse_scanout];
         if (_hardwareCursor &&
             mouse_scanout[@"shm_name"] &&
             ![mouse_scanout[@"shm_name"]  isEqual: @""])
@@ -1218,7 +1228,10 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void)cursorUpdate:(NSEvent *)event {
     _mouseInside = true;
-    [self updateGuestCursor];
+    // AppKit may call this while updating tracking regions in its display
+    // cycle. Changing overlay visibility or invalidating drawing here causes
+    // a recursive display cycle. Guest updates and lock transitions own it.
+    [self updateHostCursor];
 }
 
 - (void)mouseExited:(NSEvent *)event {
