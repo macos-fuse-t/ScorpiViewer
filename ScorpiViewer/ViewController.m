@@ -76,6 +76,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     int _displaySurfaceHeight;
     bool _cursorEnabled;
     NSCursor *_currentCursor;
+    CGFloat _cursorBackingScale;
     NSCursor *_emptyCursor;
     bool _cursorHidden;
     bool _hardwareCursor;
@@ -591,7 +592,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
         return nil;
     }
 
-    CGFloat scale = _scaling > 0 ? _scaling : [self currentBackingScale];
+    CGFloat scale = [self currentBackingScale];
     NSImage *image = [[NSImage alloc] initWithCGImage:imageRef
                             size:NSMakeSize(width / scale, height / scale)];
     CGImageRelease(imageRef);
@@ -603,6 +604,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
     NSCursor *customCursor = [[NSCursor alloc] initWithImage:image
                             hotSpot:NSMakePoint(hotspotX / scale, hotspotY / scale)];
+    if (customCursor) _cursorBackingScale = scale;
     return customCursor;
 }
 
@@ -633,6 +635,21 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void)updateGuestCursor
 {
+    // A shape can precede the IOSurface, and windows can move between screens.
+    // Keep the original bitmap pixels; only its AppKit point size and hotspot
+    // change. Never use the cached framebuffer scale for cursor conversion.
+    CGFloat scale = [self currentBackingScale];
+    if (_cursorEnabled && _currentCursor && _cursorBackingScale > 0 &&
+        _cursorBackingScale != scale) {
+        CGFloat ratio = _cursorBackingScale / scale;
+        NSImage *image = [_currentCursor.image copy];
+        NSSize size = image.size;
+        image.size = NSMakeSize(size.width * ratio, size.height * ratio);
+        NSPoint hotspot = _currentCursor.hotSpot;
+        _currentCursor = [[NSCursor alloc] initWithImage:image
+            hotSpot:NSMakePoint(hotspot.x * ratio, hotspot.y * ratio)];
+        _cursorBackingScale = scale;
+    }
     BOOL showOverlay = _relativeMouseActive && _mouseLock.isLocked &&
         _hardwareCursor && _cursorEnabled && _currentCursor && [self hasViewerInputFocus];
     if (showOverlay) {
@@ -1087,6 +1104,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     [self updateBackingScale];
     NSSize pixelSize = [self viewPixelSize];
     _view.drawableSize = CGSizeMake(pixelSize.width, pixelSize.height);
+    [self updateGuestCursor];
 }
 
 - (void)viewDidLayout {

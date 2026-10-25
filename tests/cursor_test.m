@@ -13,10 +13,56 @@
 @end
 #pragma clang diagnostic pop
 
+@interface CursorScaleController : ViewController
+@property CGFloat testScale;
+@end
+@implementation CursorScaleController
+- (CGFloat)currentBackingScale { return self.testScale; }
+@end
+
+static void CheckCursorScaleTransitions(void) {
+    CursorScaleController *controller = [[CursorScaleController alloc] init];
+    controller.view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 640, 480)];
+    controller.testScale = 1;
+    uint8_t pixels[64 * 64 * 4] = {0};
+    pixels[3] = 255;
+    NSCursor *cursor = [controller createCursorFromBuffer:pixels width:64 height:64
+        stride:256 format:VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM hotspotX:8 hotspotY:12];
+    [controller setValue:cursor forKey:@"currentCursor"];
+    [controller setValue:@YES forKey:@"cursorEnabled"];
+    [controller setValue:@YES forKey:@"hardwareCursor"];
+    assert(NSEqualSizes(cursor.image.size, NSMakeSize(64, 64)));
+
+    // The first arrow can arrive before the IOSurface/Retina transition.
+    // It must resize without waiting for Windows to send another shape.
+    controller.testScale = 2;
+    [controller updateGuestCursor];
+    cursor = [controller valueForKey:@"currentCursor"];
+    assert(NSEqualSizes(cursor.image.size, NSMakeSize(32, 32)));
+    assert(NSEqualPoints(cursor.hotSpot, NSMakePoint(4, 6)));
+    [controller updateGuestCursor];
+    assert(cursor == [controller valueForKey:@"currentCursor"]);
+
+    controller.testScale = 1;
+    [controller updateGuestCursor];
+    cursor = [controller valueForKey:@"currentCursor"];
+    assert(NSEqualSizes(cursor.image.size, NSMakeSize(64, 64)));
+    assert(NSEqualPoints(cursor.hotSpot, NSMakePoint(8, 12)));
+
+    // A later shape must use the live scale, never a stale framebuffer cache.
+    [controller setValue:@1 forKey:@"scaling"];
+    controller.testScale = 2;
+    cursor = [controller createCursorFromBuffer:pixels width:64 height:64
+        stride:256 format:VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM hotspotX:8 hotspotY:12];
+    assert(NSEqualSizes(cursor.image.size, NSMakeSize(32, 32)));
+    assert(NSEqualPoints(cursor.hotSpot, NSMakePoint(4, 6)));
+}
+
 int main(void)
 {
     @autoreleasepool {
         [NSApplication sharedApplication];
+        CheckCursorScaleTransitions();
         ViewController *controller = [[ViewController alloc] init];
         controller.view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 200)];
         NSWindow *window = [[NSWindow alloc] initWithContentRect:controller.view.frame
