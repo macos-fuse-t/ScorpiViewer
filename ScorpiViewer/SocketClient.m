@@ -234,6 +234,17 @@ static const struct lws_protocols protocols[] = {
     [self sendSyncRequest:request expectResponse: FALSE];
 }
 
+- (void)sendRelativeMouseWithButton:(int)button dx:(int)dx dy:(int)dy scroll:(int)scroll {
+    if (!_connected) return;
+    NSDictionary *request = @{
+        @"type": @"request", @"id": @([self generateRequestId]),
+        @"action": @"relative_mouse_event",
+        @"args": @[@(button).stringValue, @(dx).stringValue,
+                   @(dy).stringValue, @(scroll).stringValue],
+    };
+    [self sendSyncRequest:request expectResponse:FALSE];
+}
+
 - (void)sendScrollEventWithButton:(int)button x:(int)x y:(int)y delta:(int)delta {
     if (!_connected || delta == 0)
         return;

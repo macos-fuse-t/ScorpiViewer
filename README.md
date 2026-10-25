@@ -38,6 +38,33 @@ window. Fullscreen transitions also preserve the window frame, and fullscreen
 layout does not request a different guest resolution. Windowed mode continues
 to size the window to the guest display. Check with `tests/run-fullscreen-test.sh`.
 
+Choose **View → Lock Mouse to Window** in the menu bar, or Command + right-click
+inside the guest display and check **Lock Mouse to Window** in its context menu.
+Then click inside the guest display to capture the pointer. The capture
+click is not sent to the guest. A brief hint shows **Control + Command + G** to
+release the pointer. The option stays checked after release; click inside again
+to recapture, or uncheck it in the context menu to restore ordinary input.
+The setting is remembered across launches; each new Viewer still waits for a
+click inside before capturing the pointer.
+
+With mouse lock enabled, guest mouse and keyboard input is forwarded only while
+captured and the Viewer is focused. Release, focus loss, menus, fullscreen
+transitions, and display disconnects free the pointer and release held guest
+buttons and keys. Window moves and resizes update the confinement boundary.
+With a matching hypervisor, captured input uses relative mouse reports, allowing
+continuous camera turns past every screen edge. The physical Mac pointer stays
+hidden at the center; guest cursor shape, visibility and `move_cursor` position
+updates control a separate host-rendered overlay. Until the guest supplies cursor
+positions, visible cursor placement is estimated from movement. Ordinary
+uncaptured input continues to use absolute tablet coordinates. Older hypervisors
+retain the previous absolute confinement behavior.
+
+Restart the VM after updating the hypervisor: the existing USB tablet now exposes
+both absolute and relative HID mouse collections, with no VM configuration change
+or custom guest driver required. Confinement and its hint live in
+`MouseLockController`, and host cursor drawing lives in `GuestCursorOverlay`.
+Check with `tests/run-mouse-lock-test.sh`.
+
 View → Use Mac shortcuts is on by default and remembers your choice. It sends
 Cmd+C/X/V/A/Z/F/W to the guest as Ctrl+C/X/V/A/Z/F/W. These shortcuts reach the
 guest before macOS menus handle them, including Cmd+W for closing a guest tab or

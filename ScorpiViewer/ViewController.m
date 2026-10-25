@@ -18,6 +18,8 @@
 #import <Foundation/Foundation.h>
 #import "SocketClient.h"
 #import "ViewerSessionClient.h"
+#import "MouseLockController.h"
+#import "GuestCursorOverlay.h"
 
 #define VM_SOCK_NAME    @"/tmp/vm_sock"
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
@@ -26,6 +28,7 @@
 // Precise AppKit deltas are points; ordinary wheel deltas are line units.
 #define TRACKPAD_POINTS_PER_DETENT 40.0
 static NSString * const ScorpiUseMacShortcuts = @"UseMacShortcuts";
+static NSString * const ScorpiLockMouseToWindow = @"LockMouseToWindow";
 
 static NSString *
 ScorpiVMSocketPath(void)
@@ -63,6 +66,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     MTKView *_view;
     Renderer *_renderer;
     int _buttonPressed;
+    NSPoint _lastGuestMousePoint;
     double _scrollRemainder;
     BOOL _lastScrollWasPrecise;
     SocketClient *_sock;
@@ -96,6 +100,108 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     BOOL _clipboardObserversInstalled;
     NSUInteger _menuTracking;
     ViewerSessionClient *_viewerSession;
+    MouseLockController *_mouseLock;
+    BOOL _contextMenuMouseDown;
+    BOOL _relativeMouseSupported;
+    BOOL _relativeMouseActive;
+    NSPoint _relativeRemainder;
+    NSPoint _guestCursorPosition;
+    GuestCursorOverlay *_guestCursorOverlay;
+}
+
+- (IBAction)toggleMouseLock:(id)sender {
+    [self releaseMouseButtons];
+    [self releasePressedKeys];
+    _mouseLock.enabled = !_mouseLock.enabled;
+    [NSUserDefaults.standardUserDefaults setBool:_mouseLock.enabled forKey:ScorpiLockMouseToWindow];
+    [self refreshCursorLocation];
+}
+
+- (BOOL)hasViewerInputFocus {
+    return NSApp.isActive && self.view.window.isKeyWindow;
+}
+
+- (BOOL)canForwardGuestInput {
+    return !_mouseLock.enabled || (_mouseLock.isLocked && [self hasViewerInputFocus]);
+}
+
+- (NSMenu *)viewerContextMenu {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Viewer"];
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"Lock Mouse to Window"
+                                               action:@selector(toggleMouseLock:) keyEquivalent:@""];
+    item.target = self;
+    item.state = _mouseLock.enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:item];
+    return menu;
+}
+
+- (void)releaseMouseButtons {
+    if (!_buttonPressed) return;
+    _buttonPressed = 0;
+    [self sendMouseAtGuestPoint:_lastGuestMousePoint];
+}
+
+- (void)sendMouseAtGuestPoint:(NSPoint)point {
+    if (_relativeMouseActive) {
+        [_sock sendRelativeMouseWithButton:_buttonPressed dx:0 dy:0 scroll:0];
+        return;
+    }
+    _lastGuestMousePoint = point;
+    [_sock sendMouseEventWithButton:_buttonPressed x:(int)point.x y:(int)point.y];
+}
+
+- (NSSize)guestDisplaySize {
+    return _displaySurfaceActive ? NSMakeSize(_displaySurfaceWidth, _displaySurfaceHeight) :
+        NSMakeSize(_scanout.width, _scanout.height);
+}
+
+- (void)sendRelativeMotionX:(CGFloat)dx y:(CGFloat)dy {
+    if (!_relativeMouseActive || ![self canForwardGuestInput]) return;
+    // Preserve subpixel trackpad movement without tying sensitivity to Retina
+    // backing pixels or clamping it at the guest desktop boundary.
+    _relativeRemainder.x += dx;
+    _relativeRemainder.y += dy;
+    int x = (int)fmax(-INT_MAX, fmin(INT_MAX, _relativeRemainder.x));
+    int y = (int)fmax(-INT_MAX, fmin(INT_MAX, _relativeRemainder.y));
+    _relativeRemainder.x -= x;
+    _relativeRemainder.y -= y;
+    if (!x && !y) return;
+    [_sock sendRelativeMouseWithButton:_buttonPressed dx:x dy:y scroll:0];
+    // Until authoritative move_cursor notifications arrive, estimate a visible
+    // cursor locally. Future driver position updates replace this estimate.
+    NSSize size = [self guestDisplaySize];
+    _guestCursorPosition.x = MAX(0, MIN(_guestCursorPosition.x + x, size.width - 1));
+    _guestCursorPosition.y = MAX(0, MIN(_guestCursorPosition.y + y, size.height - 1));
+    [self updateGuestCursor];
+}
+
+- (void)installMouseLock {
+    if (_mouseLock) return;
+    _mouseLock = [[MouseLockController alloc] initWithView:self.view];
+    _mouseLock.enabled = [NSUserDefaults.standardUserDefaults boolForKey:ScorpiLockMouseToWindow];
+    __weak ViewController *weakSelf = self;
+    if (_relativeMouseSupported) {
+        _mouseLock.relativeMotionHandler = ^(CGFloat dx, CGFloat dy) {
+            [weakSelf sendRelativeMotionX:dx y:dy];
+        };
+    }
+    _mouseLock.lockChangedHandler = ^(BOOL locked) {
+        ViewController *controller = weakSelf;
+        if (!controller) return;
+        if (locked) {
+            controller->_relativeMouseActive = controller->_relativeMouseSupported;
+            controller->_relativeRemainder = NSZeroPoint;
+            controller->_guestCursorPosition = controller->_lastGuestMousePoint;
+            [controller activateInputResponder];
+        } else {
+            [controller releaseMouseButtons];
+            [controller releasePressedKeys];
+            controller->_relativeMouseActive = NO;
+            controller->_guestCursorOverlay.hidden = YES;
+            [controller restoreHostCursor];
+        }
+        [controller refreshCursorLocation];
+    };
 }
 
 - (void)updateViewerState:(NSNotification *)notification {
@@ -146,11 +252,15 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
         item.state = _clipboardEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     } else if (item.action == @selector(toggleUseMacShortcuts:)) {
         item.state = [self useMacShortcuts] ? NSControlStateValueOn : NSControlStateValueOff;
+    } else if (item.action == @selector(toggleMouseLock:)) {
+        item.state = _mouseLock.enabled ? NSControlStateValueOn : NSControlStateValueOff;
+        return _mouseLock != nil;
     }
     return YES;
 }
 
 - (IBAction)paste:(id)sender {
+    if (![self canForwardGuestInput]) return;
     // The daemon owns clipboard synchronization; send only the guest shortcut.
     [_sock sendKeyEventWithDown:1 hidcode:0x19 mods:0x01];
     [_sock sendKeyEventWithDown:0 hidcode:0x19 mods:_hidModifiers];
@@ -176,6 +286,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
             if (!controller || event.window != controller.view.window ||
                 event.window.firstResponder != controller)
                 return event;
+            if (![controller canForwardGuestInput]) return event;
             if (event.type == NSEventTypeKeyUp) {
                 // AppKit can consume Command-key releases on its menu path.
                 // Release the held HID key even if Command was released first.
@@ -284,10 +395,12 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     if ([event  isEqual: @"set_scanout"]) {
         [self setScanout: data[@"data"]];
     } else if ([event  isEqual: @"unset_scanout"]) {
+        [_mouseLock unlock];
         [self releaseScanout];
     } else if ([event isEqual: @"set_display_surface"]) {
         [self setDisplaySurface:data[@"data"]];
     } else if ([event isEqual: @"unset_display_surface"]) {
+        [_mouseLock unlock];
         _displaySurfaceActive = false;
         _displaySurfaceWidth = 0;
         _displaySurfaceHeight = 0;
@@ -352,6 +465,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 }
 
 - (void) onDisconnected {
+    [_mouseLock invalidate];
     [_viewerSession stop];
     [self restoreHostCursor];
     [self releaseScanout];
@@ -521,6 +635,26 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void)updateGuestCursor
 {
+    _guestCursorOverlay.hidden = YES;
+    if (_relativeMouseActive && _mouseLock.isLocked) {
+        if (!_cursorHidden) { [NSCursor hide]; _cursorHidden = true; }
+        if (_hardwareCursor && _cursorEnabled && _currentCursor && [self hasViewerInputFocus]) {
+            if (!_guestCursorOverlay) {
+                _guestCursorOverlay = [[GuestCursorOverlay alloc] initWithFrame:self.view.bounds];
+                _guestCursorOverlay.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+                [self.view addSubview:_guestCursorOverlay];
+            }
+            [_guestCursorOverlay showCursor:_currentCursor atGuestPoint:_guestCursorPosition
+                                 guestSize:[self guestDisplaySize] cursorScale:[self currentBackingScale]];
+        }
+        return;
+    }
+    if (_mouseLock.enabled && !_mouseLock.isLocked) {
+        [self showCursorIfHidden];
+        if (_mouseInside)
+            [[NSCursor arrowCursor] set];
+        return;
+    }
     // AppKit can reset the cursor after mouseEntered. Apply it in
     // cursorUpdate too, and never install a guest cursor outside the view.
     if (!_mouseInside || (!_scanout.enabled && !_displaySurfaceActive)) {
@@ -619,7 +753,8 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void) moveCursor: (NSDictionary *)data
 {
-    //NSLog(@"move: %d %d", [data[@"x"] intValue], [data[@"y"] intValue]);
+    _guestCursorPosition = NSMakePoint([data[@"x"] doubleValue], [data[@"y"] doubleValue]);
+    if (_relativeMouseActive) [self updateGuestCursor];
 }
 
 - (void) releaseScanout
@@ -636,6 +771,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void) initDisplay: (NSDictionary *)data
 {
+    _relativeMouseSupported = [data[@"relative_mouse"] boolValue];
     _hdpi = data[@"hdpi"] ? [ data[@"hdpi"] boolValue] : false;
 
     id hardwareCursor = data[@"hardware_mouse"];
@@ -890,6 +1026,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     }
     [self activateInputResponder];
     [self installKeyboardMonitor];
+    [self installMouseLock];
     [self refreshCursorLocation];
     if (!_clipboardObserversInstalled) {
         _clipboardObserversInstalled = YES;
@@ -905,6 +1042,8 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void)dealloc
 {
+    _mouseLock.lockChangedHandler = nil;
+    [_mouseLock invalidate];
     if (_keyboardMonitor)
         [NSEvent removeMonitor:_keyboardMonitor];
     [_viewerSession stop];
@@ -923,6 +1062,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 - (void)windowDidResignKey:(NSNotification *)notification
 {
     if (notification.object == self.view.window) {
+        [_mouseLock unlock];
         [self releasePressedKeys];
         [self restoreHostCursor];
         [self viewerFocusChanged:notification];
@@ -941,6 +1081,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void)viewDidLayout {
     [super viewDidLayout];
+    [_mouseLock updateBounds];
 
     if (_trackingArea) {
         [self.view removeTrackingArea: _trackingArea];
@@ -995,6 +1136,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 }
 
 - (void)flagsChanged:(NSEvent *)event {
+    if (![self canForwardGuestInput]) return;
     // AppKit sends modifier-only presses/releases here, not through keyUp.
     // HID usage zero updates the modifier byte without changing held keys.
     uint8_t hostModifiers = [self hidModifiersForEvent:event];
@@ -1037,6 +1179,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 }
 
 - (void) send_event: (NSEvent *)event down: (bool) down {
+    if (![self canForwardGuestInput]) return;
     uint16_t macKeyCode = event.keyCode;
     if (macKeyCode >= sizeof(macToHidKeyMap) / sizeof(macToHidKeyMap[0]))
         return;
@@ -1079,12 +1222,19 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 }
 
 - (void)mouseExited:(NSEvent *)event {
+    if (_mouseLock.isLocked) return;
     [self restoreHostCursor];
 }
 
 - (BOOL)locationFromEvent:(NSEvent *)event point:(NSPoint *)point {
     NSPoint locationInWindow = [event locationInWindow];
     NSPoint locationInView = [self.view convertPoint:locationInWindow fromView:nil];
+    if (_mouseLock.isLocked)
+        locationInView = _mouseLock.locationInView;
+    return [self convertViewPoint:locationInView toGuestPoint:point];
+}
+
+- (BOOL)convertViewPoint:(NSPoint)locationInView toGuestPoint:(NSPoint *)point {
     NSRect bounds = self.view.bounds;
 
     if (!NSPointInRect(locationInView, bounds))
@@ -1119,61 +1269,76 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 }
 
 - (void)mouseMoved:(NSEvent *)event {
-
+    if (![self canForwardGuestInput]) return;
+    if (_relativeMouseActive) return; // Capture monitor already forwarded the delta.
     NSPoint locationInView;
     if (![self locationFromEvent:event point:&locationInView])
         return;
-    [_sock sendMouseEventWithButton:_buttonPressed
-                                      x:(int)locationInView.x
-                                      y:(int)locationInView.y];
+    [self sendMouseAtGuestPoint:locationInView];
 }
 
 - (void)mouseDragged:(NSEvent *)event {
-    NSPoint locationInView;
-    if (![self locationFromEvent:event point:&locationInView])
-        return;
-    [_sock sendMouseEventWithButton:1
-                                x:(int)locationInView.x
-                                y:(int)locationInView.y];
+    [self mouseMoved:event];
+}
+
+- (void)rightMouseDragged:(NSEvent *)event {
+    [self mouseMoved:event];
 }
 
 - (void)mouseDown:(NSEvent *)event {
     [self activateInputResponder];
+    if (![self canForwardGuestInput]) return;
 
     NSPoint location;
     if (![self locationFromEvent:event point:&location])
         return;
     _buttonPressed |= 1;
-    [_sock sendMouseEventWithButton:_buttonPressed x:(int)location.x y:(int)location.y];
+    [self sendMouseAtGuestPoint:location];
 }
 
 - (void)mouseUp:(NSEvent *)event {
+    if (![self canForwardGuestInput]) return;
     NSPoint location;
     if (![self locationFromEvent:event point:&location])
         return;
     _buttonPressed &= ~1;
-    [_sock sendMouseEventWithButton:0 x:(int)location.x y:(int)location.y];
+    [self sendMouseAtGuestPoint:location];
 }
 
 - (void)rightMouseDown:(NSEvent *)event {
     [self activateInputResponder];
+    _contextMenuMouseDown = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
+    if (_contextMenuMouseDown) {
+        [_mouseLock unlock];
+        [self releaseMouseButtons];
+        [self releasePressedKeys];
+        [NSMenu popUpContextMenu:[self viewerContextMenu] withEvent:event forView:self.view];
+        return;
+    }
+    if (![self canForwardGuestInput]) return;
 
     NSPoint location;
     if (![self locationFromEvent:event point:&location])
         return;
     _buttonPressed |= 2;
-    [_sock sendMouseEventWithButton:_buttonPressed x:(int)location.x y:(int)location.y];
+    [self sendMouseAtGuestPoint:location];
 }
 
 - (void)rightMouseUp:(NSEvent *)event {
+    if (_contextMenuMouseDown) {
+        _contextMenuMouseDown = NO;
+        return;
+    }
+    if (![self canForwardGuestInput]) return;
     NSPoint location;
     if (![self locationFromEvent:event point:&location])
         return;
     _buttonPressed &= ~2;
-    [_sock sendMouseEventWithButton: 0 x:(int)location.x y:(int)location.y];
+    [self sendMouseAtGuestPoint:location];
 }
 
 - (void)scrollWheel:(NSEvent *)event {
+    if (![self canForwardGuestInput]) return;
     NSPoint location;
     if (![self locationFromEvent:event point:&location])
         return;
@@ -1193,7 +1358,9 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     double total = delta + _scrollRemainder;
     int counts = (int)fmax(-INT_MAX, fmin(INT_MAX, trunc(total)));
     _scrollRemainder = total - trunc(total);
-    if (counts)
+    if (counts && _relativeMouseActive)
+        [_sock sendRelativeMouseWithButton:_buttonPressed dx:0 dy:0 scroll:counts];
+    else if (counts)
         [_sock sendScrollEventWithButton:_buttonPressed
                                       x:(int)location.x y:(int)location.y
                                   delta:counts];

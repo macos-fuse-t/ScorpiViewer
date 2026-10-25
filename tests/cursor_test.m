@@ -9,6 +9,8 @@
 @end
 @implementation Renderer
 @end
+@implementation ViewerSessionClient
+@end
 #pragma clang diagnostic pop
 
 int main(void)

@@ -15,6 +15,8 @@ static NSMutableArray<NSArray<NSNumber *> *> *sentScrolls;
 @end
 @implementation Renderer
 @end
+@implementation ViewerSessionClient
+@end
 #pragma clang diagnostic pop
 
 @interface ScrollEvent : NSEvent
