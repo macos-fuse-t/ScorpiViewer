@@ -358,12 +358,15 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (CGFloat)currentBackingScale
 {
-    // Legacy shared-memory scanout uses the guest's HDPI policy. An
-    // IOSurface, however, is already expressed in host backing pixels and
-    // must always be converted through the local window backing scale.
-    if (!_hdpi && !_displaySurfaceActive)
-        return 1.0;
+    // Guest pixels follow the configured HDPI policy for both transports.
+    // An IOSurface contains guest pixels; using it does not opt into the
+    // physical Mac monitor's Retina density (including over Screen Sharing).
+    return _hdpi ? [self nativeBackingScale] : 1.0;
+}
 
+- (CGFloat)nativeBackingScale
+{
+    // The window's native pixel density is independent of guest HDPI policy.
     NSWindow *window = self.view.window;
     if (window && window.backingScaleFactor > 0)
         return window.backingScaleFactor;
@@ -489,6 +492,11 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
         [notification.name isEqualToString:NSWindowWillExitFullScreenNotification];
 }
 
+- (NSRect)visibleScreenFrame {
+    NSScreen *screen = self.view.window.screen ?: NSScreen.mainScreen;
+    return screen ? screen.visibleFrame : NSZeroRect;
+}
+
 - (void)resizeWindowToWidth:(int)width height:(int)height {
     NSWindow *window = self.view.window;
     if (window) {
@@ -504,8 +512,21 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
         NSRect contentRect = NSMakeRect(0, 0, widthInPoints, heightInPoints);
 
+        NSRect visibleFrame = [self visibleScreenFrame];
+        if (!NSIsEmptyRect(visibleFrame) && widthInPoints > 0 && heightInPoints > 0) {
+            NSSize available = [window contentRectForFrameRect:visibleFrame].size;
+            CGFloat fit = MIN(1.0, MIN(available.width / widthInPoints,
+                                      available.height / heightInPoints));
+            contentRect.size = NSMakeSize(widthInPoints * fit, heightInPoints * fit);
+        }
         NSRect frameRect = [window frameRectForContentRect:contentRect];
         frameRect.origin = window.frame.origin;
+        if (!NSIsEmptyRect(visibleFrame)) {
+            frameRect.origin.x = MAX(NSMinX(visibleFrame),
+                MIN(frameRect.origin.x, NSMaxX(visibleFrame) - frameRect.size.width));
+            frameRect.origin.y = MAX(NSMinY(visibleFrame),
+                MIN(frameRect.origin.y, NSMaxY(visibleFrame) - frameRect.size.height));
+        }
 
         _programmaticResize = true;
         [window setFrame:frameRect display:YES animate:NO];

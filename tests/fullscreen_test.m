@@ -22,6 +22,7 @@ static NSUInteger resizeRequests;
 @end
 
 @implementation FullScreenWindow
+- (CGFloat)backingScaleFactor { return 2; }
 - (NSWindowStyleMask)styleMask {
     return [super styleMask] | (self.testFullScreen ? NSWindowStyleMaskFullScreen : 0);
 }
@@ -29,6 +30,12 @@ static NSUInteger resizeRequests;
     self.frameChanges++;
     [super setFrame:frame display:display animate:animate];
 }
+@end
+
+@interface ScreenFitController : ViewController
+@end
+@implementation ScreenFitController
+- (NSRect)visibleScreenFrame { return NSMakeRect(100, 50, 1920, 1040); }
 @end
 
 static void Pump(void) {
@@ -62,6 +69,32 @@ int main(void) {
                         backing:NSBackingStoreBuffered defer:NO];
         window.contentView = controller.view;
         [controller setValue:[[SocketClient alloc] init] forKey:@"sock"];
+
+        // A non-HDPI sharing session must retain its configured point scale
+        // when the guest switches from shared memory to an IOSurface, even
+        // though the Mac window belongs to a Retina monitor.
+        assert([controller currentBackingScale] == 1);
+        [controller setValue:@YES forKey:@"displaySurfaceActive"];
+        assert([controller currentBackingScale] == 1);
+        [controller setValue:@YES forKey:@"hdpi"];
+        assert([controller currentBackingScale] == 2);
+        [controller setValue:@NO forKey:@"hdpi"];
+        [controller setValue:@NO forKey:@"displaySurfaceActive"];
+
+        // A saved high-resolution guest mode must fit the available desktop,
+        // including title bar and an off-screen saved window origin.
+        ScreenFitController *fitted = [[ScreenFitController alloc] init];
+        fitted.view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
+        FullScreenWindow *fittedWindow = [[FullScreenWindow alloc]
+            initWithContentRect:NSMakeRect(2500, -500, 800, 600)
+            styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable
+            backing:NSBackingStoreBuffered defer:NO];
+        fittedWindow.contentView = fitted.view;
+        [fitted setValue:@YES forKey:@"displaySurfaceActive"];
+        [fitted resizeWindowToWidth:3840 height:2160];
+        assert(NSContainsRect([fitted visibleScreenFrame], fittedWindow.frame));
+        NSSize contentSize = fitted.view.bounds.size;
+        assert(fabs(contentSize.width / contentSize.height - 3840.0 / 2160.0) < 0.001);
 
         // Windowed resolution changes still set the content size in points.
         [controller resizeWindowToWidth:640 height:480];
