@@ -76,7 +76,10 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
     int _displaySurfaceHeight;
     bool _cursorEnabled;
     NSCursor *_currentCursor;
-    CGFloat _cursorBackingScale;
+    NSSize _cursorImageScale;
+    BOOL _cursorGeometryUpdatePending;
+    NSBitmapImageRep *_cursorBitmap;
+    NSPoint _cursorPixelHotspot;
     NSCursor *_emptyCursor;
     bool _cursorHidden;
     bool _hardwareCursor;
@@ -613,20 +616,67 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
         return nil;
     }
 
-    CGFloat scale = [self currentBackingScale];
-    NSImage *image = [[NSImage alloc] initWithCGImage:imageRef
-                            size:NSMakeSize(width / scale, height / scale)];
+    _cursorBitmap = [[NSBitmapImageRep alloc] initWithCGImage:imageRef];
+    _cursorPixelHotspot = NSMakePoint(hotspotX, hotspotY);
     CGImageRelease(imageRef);
+    return [self cursorForImageScale:[self cursorImageScale]];
+}
 
-    if (!image) {
-        NSLog(@"Failed to create NSImage.");
-        return nil;
+// Cursor dimensions and hotspots arrive in guest framebuffer pixels. Match
+// their presentation to the image, including fit-to-window and fullscreen
+// stretching; the monitor's backing scale alone does not describe that mapping.
+- (NSSize)cursorImageScale
+{
+    NSSize guest = [self guestDisplaySize];
+    NSSize view = self.view.bounds.size;
+    if (guest.width > 0 && guest.height > 0 && view.width > 0 && view.height > 0)
+        return NSMakeSize(guest.width / view.width, guest.height / view.height);
+    CGFloat scale = [self currentBackingScale];
+    return NSMakeSize(scale, scale);
+}
+
+- (NSCursor *)cursorForImageScale:(NSSize)scale
+{
+    if (!_cursorBitmap) return nil;
+    NSSize pointSize = NSMakeSize(_cursorBitmap.pixelsWide / scale.width,
+                                 _cursorBitmap.pixelsHigh / scale.height);
+    NSImage *image = [[NSImage alloc] initWithSize:pointSize];
+    // Both the image and the bitmap representation must describe the same
+    // point size. Keep the source pixels separate: NSCursor can rasterize its
+    // image for the local screen, which must not become our next source.
+    NSBitmapImageRep *bitmap = [_cursorBitmap copy];
+    bitmap.size = pointSize;
+    // Supply a standard-density representation as well as the original
+    // guest pixels. Cursor consumers such as Screen Sharing may request 1x
+    // even while the local display uses 2x. Every representation describes
+    // the same point rectangle; changing the bitmap density must not change
+    // the physical cursor's size or hotspot.
+    NSInteger standardWidth = MAX(1, (NSInteger)ceil(pointSize.width));
+    NSInteger standardHeight = MAX(1, (NSInteger)ceil(pointSize.height));
+    if (bitmap.pixelsWide > standardWidth || bitmap.pixelsHigh > standardHeight) {
+        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+        CGContextRef context = CGBitmapContextCreate(NULL, standardWidth,
+            standardHeight, 8, 0, colorSpace, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+        CGColorSpaceRelease(colorSpace);
+        if (context) {
+            CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+            CGContextDrawImage(context,
+                CGRectMake(0, 0, standardWidth, standardHeight), bitmap.CGImage);
+            CGImageRef standardImage = CGBitmapContextCreateImage(context);
+            if (standardImage) {
+                NSBitmapImageRep *standard = [[NSBitmapImageRep alloc] initWithCGImage:standardImage];
+                standard.size = pointSize;
+                [image addRepresentation:standard];
+                CGImageRelease(standardImage);
+            }
+            CGContextRelease(context);
+        }
     }
-
-    NSCursor *customCursor = [[NSCursor alloc] initWithImage:image
-                            hotSpot:NSMakePoint(hotspotX / scale, hotspotY / scale)];
-    if (customCursor) _cursorBackingScale = scale;
-    return customCursor;
+    [image addRepresentation:bitmap];
+    NSCursor *cursor = [[NSCursor alloc] initWithImage:image
+        hotSpot:NSMakePoint(_cursorPixelHotspot.x / scale.width, _cursorPixelHotspot.y / scale.height)];
+    if (cursor) _cursorImageScale = scale;
+    return cursor;
 }
 
 - (NSCursor *)emptyCursor
@@ -656,20 +706,13 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void)updateGuestCursor
 {
-    // A shape can precede the IOSurface, and windows can move between screens.
-    // Keep the original bitmap pixels; only its AppKit point size and hotspot
-    // change. Never use the cached framebuffer scale for cursor conversion.
-    CGFloat scale = [self currentBackingScale];
-    if (_cursorEnabled && _currentCursor && _cursorBackingScale > 0 &&
-        _cursorBackingScale != scale) {
-        CGFloat ratio = _cursorBackingScale / scale;
-        NSImage *image = [_currentCursor.image copy];
-        NSSize size = image.size;
-        image.size = NSMakeSize(size.width * ratio, size.height * ratio);
-        NSPoint hotspot = _currentCursor.hotSpot;
-        _currentCursor = [[NSCursor alloc] initWithImage:image
-            hotSpot:NSMakePoint(hotspot.x * ratio, hotspot.y * ratio)];
-        _cursorBackingScale = scale;
+    // Shapes can precede the display or move between backing scales. Rebuild
+    // from guest pixels, with matching image/representation point sizes, so
+    // NSCursor's local rasterization cannot accumulate scaling on reuse.
+    NSSize scale = [self cursorImageScale];
+    if (_cursorEnabled && _currentCursor && _cursorBitmap &&
+        !NSEqualSizes(_cursorImageScale, scale)) {
+        _currentCursor = [self cursorForImageScale:scale];
     }
     BOOL showOverlay = _relativeMouseActive && _mouseLock.isLocked &&
         _hardwareCursor && _cursorEnabled && _currentCursor && [self hasViewerInputFocus];
@@ -680,7 +723,7 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
             [self.view addSubview:_guestCursorOverlay];
         }
         [_guestCursorOverlay showCursor:_currentCursor atGuestPoint:_guestCursorPosition
-                             guestSize:[self guestDisplaySize] cursorScale:[self currentBackingScale]];
+                             guestSize:[self guestDisplaySize] cursorScale:_cursorImageScale];
     } else if (_guestCursorOverlay && !_guestCursorOverlay.isHidden) {
         _guestCursorOverlay.hidden = YES;
     }
@@ -1130,6 +1173,19 @@ static NSString *ScorpiViewerOption(NSString *flag, NSString *environmentName) {
 
 - (void)viewDidLayout {
     [super viewDidLayout];
+    // Layout can run inside AppKit's cursor-tracking/display cycle. Coalesce
+    // presentation changes onto the next turn rather than invalidating the
+    // overlay while AppKit is processing that cycle.
+    if (_cursorEnabled && _cursorBitmap && !_cursorGeometryUpdatePending) {
+        _cursorGeometryUpdatePending = YES;
+        __weak ViewController *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ViewController *controller = weakSelf;
+            if (!controller) return;
+            controller->_cursorGeometryUpdatePending = NO;
+            [controller updateGuestCursor];
+        });
+    }
     [_mouseLock updateBounds];
 
     if (_trackingArea) {

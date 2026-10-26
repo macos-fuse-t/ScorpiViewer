@@ -4,15 +4,15 @@
     NSCursor *_cursor;
     NSPoint _guestPoint;
     NSSize _guestSize;
-    CGFloat _cursorScale;
+    NSSize _cursorScale;
 }
 
 - (NSView *)hitTest:(NSPoint)point { return nil; }
 
 - (void)showCursor:(NSCursor *)cursor atGuestPoint:(NSPoint)point
-        guestSize:(NSSize)size cursorScale:(CGFloat)scale {
+        guestSize:(NSSize)size cursorScale:(NSSize)scale {
     if (!self.isHidden && _cursor == cursor && NSEqualPoints(_guestPoint, point) &&
-        NSEqualSizes(_guestSize, size) && _cursorScale == scale)
+        NSEqualSizes(_guestSize, size) && NSEqualSizes(_cursorScale, scale))
         return;
     _cursor = cursor;
     _guestPoint = point;
@@ -29,9 +29,9 @@
     NSSize imageSize = _cursor.image.size;
     NSPoint hotspot = _cursor.hotSpot;
     NSRect rect = NSMakeRect(
-        NSMinX(self.bounds) + (_guestPoint.x - hotspot.x * _cursorScale) * sx,
-        NSMaxY(self.bounds) - (_guestPoint.y + (imageSize.height - hotspot.y) * _cursorScale) * sy,
-        imageSize.width * _cursorScale * sx, imageSize.height * _cursorScale * sy);
+        NSMinX(self.bounds) + (_guestPoint.x - hotspot.x * _cursorScale.width) * sx,
+        NSMaxY(self.bounds) - (_guestPoint.y + (imageSize.height - hotspot.y) * _cursorScale.height) * sy,
+        imageSize.width * _cursorScale.width * sx, imageSize.height * _cursorScale.height * sy);
     [_cursor.image drawInRect:rect];
 }
 
